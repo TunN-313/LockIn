@@ -47,7 +47,7 @@ public final class QuickImportParserService: QuickImportParserProtocol {
             let question = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
             let answer = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
             let hintOrNote = parts.count >= 3
-                ? parts.dropFirst(2).joined(separator: " | ").trimmingCharacters(in: .whitespacesAndNewlines)
+                ? parts.dropFirst(2).joined(separator: "|").trimmingCharacters(in: .whitespacesAndNewlines)
                 : ""
 
             guard !question.isEmpty, !answer.isEmpty else {

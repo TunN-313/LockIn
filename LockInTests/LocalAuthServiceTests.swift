@@ -146,7 +146,7 @@ final class LocalAuthServiceTests: XCTestCase {
         defer { env.cleanup() }
         let userCredential = "PinOwner#2026"
 
-        _ = try await env.container.auth.register(
+        let user = try await env.container.auth.register(
             username: "pin_tester",
             displayName: "Pin Tester",
             password: userCredential
@@ -165,14 +165,24 @@ final class LocalAuthServiceTests: XCTestCase {
         let lockRequired = await env.container.security.isAppLockRequired()
         XCTAssertTrue(lockRequired)
 
-        env.keychain.simulateStandardReadFailure = true
+        let cooldownAccount = KeychainAccountKeys.pinCooldown(for: user.id)
+        env.keychain.failingReadAccounts = [cooldownAccount]
         do {
             _ = try await env.container.security.verifyFallbackPin("135790")
             XCTFail("Khi lỗi đọc trạng thái cooldown phải fail-closed.")
         } catch let error as LockInDomainError {
             XCTAssertEqual(error, .pinCooldownStateUnverifiableRequiresPassword)
         }
-        env.keychain.simulateStandardReadFailure = false
+        env.keychain.failingReadAccounts = []
+
+        try env.keychain.saveStandardData(Data("corrupted-json".utf8), account: cooldownAccount)
+        do {
+            _ = try await env.container.security.verifyFallbackPin("135790")
+            XCTFail("Dữ liệu cooldown bị hỏng phải fail-closed.")
+        } catch let error as LockInDomainError {
+            XCTAssertEqual(error, .pinCooldownStateUnverifiableRequiresPassword)
+        }
+        try await env.container.security.unlockAndResetPinCooldown(usingPassword: userCredential)
 
         for attempt in 1..<AppConstants.maxPinFailedAttempts {
             let result = try await env.container.security.verifyFallbackPin("000000")

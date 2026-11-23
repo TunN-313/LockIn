@@ -14,6 +14,7 @@ public final class InMemoryKeychainStorage: KeychainStorageProtocol, @unchecked 
     public var simulateBiometricAuthCancel = false
     public var simulateStandardReadFailure = false
     public var simulateStandardWriteFailure = false
+    public var failingReadAccounts: Set<String> = []
 
     public init() {}
 
@@ -29,7 +30,7 @@ public final class InMemoryKeychainStorage: KeychainStorageProtocol, @unchecked 
     public func loadStandardData(account: String) throws -> Data? {
         lock.lock()
         defer { lock.unlock() }
-        if simulateStandardReadFailure {
+        if simulateStandardReadFailure || failingReadAccounts.contains(account) {
             throw LockInDomainError.persistenceFailure("Simulated Keychain read failure.")
         }
         return standardStorage[account]

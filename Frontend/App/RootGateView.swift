@@ -10,6 +10,8 @@ public struct RootGateView: View {
     @State private var activeUser: UserProfileDTO?
     @State private var isAppUnlocked: Bool = false
     @State private var isBootstrapping: Bool = true
+    @State private var didEnterBackground: Bool = false
+    @State private var isAppLockRequiredCached: Bool = false
     @State private var activePalette: ThemePalette = .minimalPaper
 
     public init(container: DependencyContainer) {
@@ -24,31 +26,35 @@ public struct RootGateView: View {
                     ProgressView("Đang khởi tạo LockIn...")
                 }
             } else if activeUser == nil {
-                AuthLoginRegisterView(
-                    viewModel: AuthLoginRegisterViewModel(
-                        authModule: container.auth,
-                        onAuthenticated: { profile in
-                            activeUser = profile
-                            isAppUnlocked = true
-                            Task { await reloadActivePalette() }
+                AuthGateHostView(
+                    authModule: container.auth,
+                    onAuthenticated: { profile in
+                        activeUser = profile
+                        isAppUnlocked = true
+                        didEnterBackground = false
+                        Task {
+                            isAppLockRequiredCached = await container.security.isAppLockRequired()
+                            await reloadActivePalette()
                         }
-                    )
+                    }
                 )
             } else if !isAppUnlocked {
-                AppLockGateView(
-                    viewModel: AppLockGateViewModel(
-                        securityModule: container.security,
-                        onUnlocked: {
-                            isAppUnlocked = true
-                            Task {
-                                _ = try? await container.theme.rotateThemeIfNeeded(triggerOnAppOpen: true)
-                                await reloadActivePalette()
-                            }
+                AppLockGateHostView(
+                    securityModule: container.security,
+                    onUnlocked: {
+                        isAppUnlocked = true
+                        didEnterBackground = false
+                        Task {
+                            isAppLockRequiredCached = await container.security.isAppLockRequired()
+                            _ = try? await container.theme.rotateThemeIfNeeded(triggerOnAppOpen: true)
+                            await reloadActivePalette()
                         }
-                    )
+                    }
                 )
+                .id(activeUser?.id)
             } else {
                 MainTabContainerView(container: container)
+                    .id(activeUser?.id)
             }
         }
         .lockInTheme(activePalette)
@@ -61,16 +67,24 @@ public struct RootGateView: View {
             case .active:
                 container.syncEventBus.refreshAll()
                 Task {
-                    if activeUser != nil && isAppUnlocked {
+                    let lockRequired = await container.security.isAppLockRequired()
+                    isAppLockRequiredCached = lockRequired
+                    if didEnterBackground {
+                        didEnterBackground = false
+                        if activeUser != nil && lockRequired {
+                            isAppUnlocked = false
+                        } else if activeUser != nil && isAppUnlocked {
+                            _ = try? await container.theme.rotateThemeIfNeeded(triggerOnAppOpen: true)
+                        }
+                    } else if activeUser != nil && isAppUnlocked {
                         _ = try? await container.theme.rotateThemeIfNeeded(triggerOnAppOpen: true)
                     }
                     await reloadActivePalette()
                 }
             case .background:
-                Task {
-                    if activeUser != nil, await container.security.isAppLockRequired() {
-                        isAppUnlocked = false
-                    }
+                didEnterBackground = true
+                if activeUser != nil && isAppLockRequiredCached {
+                    isAppUnlocked = false
                 }
             default:
                 break
@@ -84,12 +98,14 @@ public struct RootGateView: View {
         activeUser = user
         if user != nil {
             let lockRequired = await container.security.isAppLockRequired()
+            isAppLockRequiredCached = lockRequired
             isAppUnlocked = !lockRequired
             if isAppUnlocked {
                 _ = try? await container.theme.rotateThemeIfNeeded(triggerOnAppOpen: true)
             }
             await reloadActivePalette()
         } else {
+            isAppLockRequiredCached = false
             isAppUnlocked = false
             activePalette = .minimalPaper
         }
@@ -113,10 +129,14 @@ public struct RootGateView: View {
                 if newUserId == nil {
                     activeUser = nil
                     isAppUnlocked = false
+                    isAppLockRequiredCached = false
+                    didEnterBackground = false
                     activePalette = .minimalPaper
                 } else {
                     activeUser = await container.auth.currentActiveUser()
                     isAppUnlocked = true
+                    didEnterBackground = false
+                    isAppLockRequiredCached = await container.security.isAppLockRequired()
                     await reloadActivePalette()
                 }
             case .themeRotated(let themeId):
@@ -127,5 +147,41 @@ public struct RootGateView: View {
                 break
             }
         }
+    }
+}
+
+private struct AuthGateHostView: View {
+    @State private var viewModel: AuthLoginRegisterViewModel
+
+    init(
+        authModule: AuthModuleProtocol,
+        onAuthenticated: @escaping (UserProfileDTO) -> Void
+    ) {
+        _viewModel = State(initialValue: AuthLoginRegisterViewModel(
+            authModule: authModule,
+            onAuthenticated: onAuthenticated
+        ))
+    }
+
+    var body: some View {
+        AuthLoginRegisterView(viewModel: viewModel)
+    }
+}
+
+private struct AppLockGateHostView: View {
+    @State private var viewModel: AppLockGateViewModel
+
+    init(
+        securityModule: SecurityModuleProtocol,
+        onUnlocked: @escaping () -> Void
+    ) {
+        _viewModel = State(initialValue: AppLockGateViewModel(
+            securityModule: securityModule,
+            onUnlocked: onUnlocked
+        ))
+    }
+
+    var body: some View {
+        AppLockGateView(viewModel: viewModel)
     }
 }

@@ -109,8 +109,8 @@ final class PasswordCryptoServiceTests: XCTestCase {
         }
 
         XCTAssertThrowsError(try crypto.encryptAESGCM(plaintext: plaintext, keyData: Data([1, 2, 3]))) { error in
-            guard case LockInDomainError.validationFailed = error else {
-                return XCTFail("Kỳ vọng validationFailed khi keyData không đủ 32 bytes, nhận: \(error)")
+            guard case LockInDomainError.persistenceFailure = error else {
+                return XCTFail("Kỳ vọng persistenceFailure khi keyData không đủ 32 bytes, nhận: \(error)")
             }
         }
     }
