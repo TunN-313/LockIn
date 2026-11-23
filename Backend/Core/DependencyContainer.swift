@@ -77,6 +77,20 @@ public final class DependencyContainer {
         )
     }
 
+    public static func makeForUnitTestHost() throws -> DependencyContainer {
+        let modelContainer = try SharedStoreContainer.makeInMemoryForTesting()
+        let testDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LockInHostTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+        let snapshotStore = try AppGroupSnapshotStore.makeForTesting(directoryURL: testDir)
+        return makeForTesting(
+            modelContainer: modelContainer,
+            snapshotStore: snapshotStore,
+            keychain: KeychainStorageService(),
+            enableDarwinObserver: false
+        )
+    }
+
     private static func makeConfigured(
         modelContainer: ModelContainer,
         snapshotStore: AppGroupSnapshotStoreProtocol,
