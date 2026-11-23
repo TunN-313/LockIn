@@ -1,0 +1,114 @@
+name: iOS Free IPA Build & Verify
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-and-package:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Inspect available Xcode installations & verify Swift toolchain
+        run: |
+          ls -d /Applications/Xcode*.app || true
+          xcode-select -p
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Generate LockIn.xcodeproj and verify 4 plist/entitlement outputs
+        run: |
+          xcodegen generate --spec project.yml
+          for f in \
+            Shared/Config/LockInApp-Info.plist \
+            Shared/Config/LockInApp.entitlements \
+            Shared/Config/LockInWidgetsExtension-Info.plist \
+            Shared/Config/LockInWidgetsExtension.entitlements; do
+            echo "=== $f ==="
+            cat "$f"
+          done
+
+          grep -q "NSSupportsLiveActivities" Shared/Config/LockInApp-Info.plist
+          grep -q "NSFaceIDUsageDescription" Shared/Config/LockInApp-Info.plist
+          grep -q "NSPhotoLibraryAddUsageDescription" Shared/Config/LockInApp-Info.plist
+          grep -q "com.apple.widgetkit-extension" Shared/Config/LockInWidgetsExtension-Info.plist
+          grep -q "com.apple.security.application-groups" Shared/Config/LockInApp.entitlements
+          grep -q "com.apple.security.application-groups" Shared/Config/LockInWidgetsExtension.entitlements
+          if grep -q "aps-environment" Shared/Config/*.entitlements; then
+            echo "ERROR: aps-environment must not exist for free $0 sideload"
+            exit 1
+          fi
+
+      - name: Verify LockInWidgetsExtension compiles cleanly on iOS Simulator
+        run: |
+          SIM_ID=$(xcrun simctl list devices available iPhone | grep -oE "[A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12}" | head -n 1)
+          test -n "$SIM_ID"
+          echo "Using Simulator UDID: $SIM_ID"
+          xcodebuild build \
+            -project LockIn.xcodeproj \
+            -target LockInWidgetsExtension \
+            -sdk iphonesimulator \
+            -destination "id=$SIM_ID" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Run Unit Tests (when Frontend entry point and test suites exist)
+        run: |
+          if [ -d "Frontend" ] && ls LockInTests/*Tests.swift >/dev/null 2>&1; then
+            SIM_ID=$(xcrun simctl list devices available iPhone | grep -oE "[A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12}" | head -n 1)
+            test -n "$SIM_ID"
+            xcodebuild test \
+              -project LockIn.xcodeproj \
+              -scheme LockInApp \
+              -destination "id=$SIM_ID" \
+              CODE_SIGNING_ALLOWED=NO
+          else
+            echo "Skipping full LockInTests run until Frontend/ (Wave 2 M2) and 8 test suites (M4b) are added."
+          fi
+
+      - name: Build unsigned Release LockInApp & package LockIn-unsigned.ipa
+        run: |
+          if [ ! -d "Frontend" ]; then
+            echo "Skipping .ipa packaging until Frontend/App/LockInAppEntry.swift is added in Wave 2 (M2)."
+            exit 0
+          fi
+
+          rm -rf build
+          xcodebuild build \
+            -project LockIn.xcodeproj \
+            -scheme LockInApp \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+          APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/LockInApp.app"
+          test -d "$APP_PATH"
+          test -d "$APP_PATH/PlugIns/LockInWidgetsExtension.appex"
+
+          mkdir -p build/Payload
+          cp -R "$APP_PATH" build/Payload/
+          cd build
+          zip -r -y LockIn-unsigned.ipa Payload
+          ls -lh LockIn-unsigned.ipa
+
+      - name: Upload LockIn-unsigned.ipa Artifact
+        if: always() && hashFiles('build/LockIn-unsigned.ipa') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: LockIn-unsigned-ipa
+          path: build/LockIn-unsigned.ipa
+          retention-days: 30
