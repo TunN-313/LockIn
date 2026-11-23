@@ -121,7 +121,8 @@ final class StudyScheduleServiceTests: XCTestCase {
 
         let cancelCallsBeforeDelete = env.notificationService.cancelAllCallCount
         try await env.container.scheduler.deleteSchedule(scheduleId: created.id)
-        XCTAssertTrue(try await env.container.scheduler.fetchSchedules().isEmpty)
+        let schedulesAfterDelete = try await env.container.scheduler.fetchSchedules()
+        XCTAssertTrue(schedulesAfterDelete.isEmpty)
         XCTAssertTrue(env.notificationService.pendingIdentifiers.isEmpty)
         XCTAssertGreaterThan(env.notificationService.cancelAllCallCount, cancelCallsBeforeDelete)
     }

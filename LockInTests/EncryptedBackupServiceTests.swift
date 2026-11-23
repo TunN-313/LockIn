@@ -259,7 +259,9 @@ final class EncryptedBackupServiceTests: XCTestCase {
             passphrase: backupPhrase,
             mode: .merge
         )
-        XCTAssertEqual(try await env.container.study.fetchDecks().count, 1)
-        XCTAssertEqual(try await env.container.study.fetchCards(deckId: deckA.id).count, 1)
+        let finalDecksA = try await env.container.study.fetchDecks()
+        let finalCardsA = try await env.container.study.fetchCards(deckId: deckA.id)
+        XCTAssertEqual(finalDecksA.count, 1)
+        XCTAssertEqual(finalCardsA.count, 1)
     }
 }

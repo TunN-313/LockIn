@@ -91,9 +91,12 @@ final class UserDataIsolationGuardTests: XCTestCase {
             password: userCredential
         )
 
-        XCTAssertTrue(try await env.container.study.fetchDecks().isEmpty)
-        XCTAssertTrue(try await env.container.study.fetchTasks().isEmpty)
-        XCTAssertTrue(try await env.container.scheduler.fetchSchedules().isEmpty)
+        let decksB = try await env.container.study.fetchDecks()
+        let tasksB = try await env.container.study.fetchTasks()
+        let schedulesB = try await env.container.scheduler.fetchSchedules()
+        XCTAssertTrue(decksB.isEmpty)
+        XCTAssertTrue(tasksB.isEmpty)
+        XCTAssertTrue(schedulesB.isEmpty)
         let prefB = try await env.container.theme.fetchPreference()
         XCTAssertEqual(prefB.activeThemeId, ThemePalette.minimalPaper.id)
 
@@ -195,8 +198,10 @@ final class UserDataIsolationGuardTests: XCTestCase {
         )
 
         try await env.container.storageMaintenance.purgeCurrentUserStudyData()
-        XCTAssertTrue(try await env.container.study.fetchDecks().isEmpty)
-        XCTAssertTrue(try await env.container.study.fetchTasks().isEmpty)
+        let purgedDecksB = try await env.container.study.fetchDecks()
+        let purgedTasksB = try await env.container.study.fetchTasks()
+        XCTAssertTrue(purgedDecksB.isEmpty)
+        XCTAssertTrue(purgedTasksB.isEmpty)
 
         _ = try await env.container.auth.switchProfile(userId: userA.id, password: userCredential)
         let decksA = try await env.container.study.fetchDecks()
