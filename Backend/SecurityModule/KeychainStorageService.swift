@@ -32,17 +32,29 @@ public final class KeychainStorageService: KeychainStorageProtocol {
     }
 
     public func saveStandardData(_ data: Data, account: String) throws {
-        try deleteStandardData(account: account)
-        let query: [String: Any] = [
+        let matchQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: serviceIdentifier,
-            kSecAttrAccount as String: account,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-            kSecValueData as String: data
+            kSecAttrAccount as String: account
         ]
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw LockInDomainError.persistenceFailure("Keychain SecItemAdd thất bại (status: \(status)).")
+        let attributesToUpdate: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        ]
+        let updateStatus = SecItemUpdate(matchQuery as CFDictionary, attributesToUpdate as CFDictionary)
+        switch updateStatus {
+        case errSecSuccess:
+            return
+        case errSecItemNotFound:
+            var addQuery = matchQuery
+            addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            addQuery[kSecValueData as String] = data
+            let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+            guard addStatus == errSecSuccess else {
+                throw LockInDomainError.persistenceFailure("Keychain SecItemAdd thất bại (status: \(addStatus)).")
+            }
+        default:
+            throw LockInDomainError.persistenceFailure("Keychain SecItemUpdate thất bại (status: \(updateStatus)).")
         }
     }
 

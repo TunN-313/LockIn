@@ -116,119 +116,144 @@ public final class LiveActivityBridgeService: LockScreenModuleProtocol, @uncheck
 
     public func syncSnapshotFromStore() async throws {
         let session = try isolationGuard.requireActiveSession()
-        let snapshot = try snapshotStore.loadSnapshot()
 
-        let data: SnapshotStoreSyncPayload = try await studyStore.perform { context in
-            let uid = session.userId
-            let pref = try ThemeCatalogService.fetchOrCreatePreference(for: uid, in: context)
-            let progress = try SharedDailyProgressHelper.fetchOrCreateTodayProgress(for: uid, in: context)
-            let pendingTasks = try context.fetch(
-                FetchDescriptor<TaskItem>(predicate: #Predicate<TaskItem> { $0.ownerUserId == uid && $0.isCompleted == false })
-            ).sorted(by: SharedTaskQuickActionEngine.sortTasks)
+        for attempt in 0..<3 {
+            let snapshot = try snapshotStore.loadSnapshot()
+            guard snapshot.activeUserId == session.userId,
+                  snapshot.sessionEpoch == session.sessionEpoch else {
+                throw AppGroupStorageError.sessionInvalidatedOrLoggedOut
+            }
+            let observedDeckId = snapshot.activeDeckId
+            let observedRevisionId = snapshot.snapshotRevisionId
 
-            var deckTitle: String?
-            var cards: [(id: UUID, question: String, answer: String, isMastered: Bool)] = []
-            if let deckId = snapshot.activeDeckId {
-                let targetDeckId = deckId
-                if let deck = try context.fetch(
-                    FetchDescriptor<StudyDeck>(predicate: #Predicate<StudyDeck> { $0.id == targetDeckId && $0.ownerUserId == uid })
-                ).first {
-                    deckTitle = deck.title
-                    cards = deck.cards
-                        .filter { $0.ownerUserId == uid }
-                        .sorted { ($0.sortOrder, $0.id.uuidString) < ($1.sortOrder, $1.id.uuidString) }
-                        .map { ($0.id, $0.question, $0.answer, $0.status == .mastered) }
+            let data: SnapshotStoreSyncPayload = try await studyStore.perform { context in
+                let uid = session.userId
+                let pref = try ThemeCatalogService.fetchOrCreatePreference(for: uid, in: context)
+                let progress = try SharedDailyProgressHelper.fetchOrCreateTodayProgress(for: uid, in: context)
+                let pendingTasks = try context.fetch(
+                    FetchDescriptor<TaskItem>(predicate: #Predicate<TaskItem> { $0.ownerUserId == uid && $0.isCompleted == false })
+                ).sorted(by: SharedTaskQuickActionEngine.sortTasks)
+
+                var deckTitle: String?
+                var cards: [(id: UUID, question: String, answer: String, isMastered: Bool)] = []
+                if let deckId = observedDeckId {
+                    let targetDeckId = deckId
+                    if let deck = try context.fetch(
+                        FetchDescriptor<StudyDeck>(predicate: #Predicate<StudyDeck> { $0.id == targetDeckId && $0.ownerUserId == uid })
+                    ).first {
+                        deckTitle = deck.title
+                        cards = deck.cards
+                            .filter { $0.ownerUserId == uid }
+                            .sorted { ($0.sortOrder, $0.id.uuidString) < ($1.sortOrder, $1.id.uuidString) }
+                            .map { ($0.id, $0.question, $0.answer, $0.status == .mastered) }
+                    }
                 }
+
+                try context.save()
+                return SnapshotStoreSyncPayload(
+                    activeThemeId: pref.activeThemeId,
+                    isShuffleEnabled: pref.isShuffleEnabled,
+                    shufflePoolIds: pref.shufflePoolIds,
+                    privacyModeEnabled: pref.privacyModeEnabled,
+                    fontScaleRaw: pref.lockScreenFontScale,
+                    hideAnswerByDefault: pref.hideAnswerByDefault,
+                    progressRatio: SharedDailyProgressHelper.completionRatio(for: progress),
+                    streak: progress.streakCount,
+                    nextTaskId: pendingTasks.first?.id,
+                    nextTaskTitle: pendingTasks.first?.title,
+                    deckTitle: deckTitle,
+                    cards: cards
+                )
             }
 
-            try context.save()
-            return SnapshotStoreSyncPayload(
-                activeThemeId: pref.activeThemeId,
-                isShuffleEnabled: pref.isShuffleEnabled,
-                shufflePoolIds: pref.shufflePoolIds,
-                privacyModeEnabled: pref.privacyModeEnabled,
-                fontScaleRaw: pref.lockScreenFontScale,
-                hideAnswerByDefault: pref.hideAnswerByDefault,
-                progressRatio: SharedDailyProgressHelper.completionRatio(for: progress),
-                streak: progress.streakCount,
-                nextTaskId: pendingTasks.first?.id,
-                nextTaskTitle: pendingTasks.first?.title,
-                deckTitle: deckTitle,
-                cards: cards
-            )
-        }
+            do {
+                let updatedSnapshot = try snapshotStore.mutateSnapshotIfSessionMatches(
+                    expectedUserId: session.userId,
+                    expectedSessionEpoch: session.sessionEpoch,
+                    expectedRevisionId: observedRevisionId
+                ) { state in
+                    guard state.activeDeckId == observedDeckId else {
+                        throw AppGroupStorageError.staleSnapshotRevision(
+                            expected: observedRevisionId,
+                            actual: state.snapshotRevisionId
+                        )
+                    }
 
-        let updatedSnapshot = try snapshotStore.mutateSnapshotIfSessionMatches(
-            expectedUserId: session.userId,
-            expectedSessionEpoch: session.sessionEpoch
-        ) { state in
-            state.activeThemeId = data.activeThemeId
-            state.isShuffleEnabled = data.isShuffleEnabled
-            state.shufflePoolIds = data.shufflePoolIds
-            state.privacyModeEnabled = data.privacyModeEnabled
-            state.fontScaleRaw = data.fontScaleRaw
-            state.dailyProgressRatio = data.progressRatio
-            state.streakCount = data.streak
-            state.nextTaskId = data.nextTaskId
-            state.nextTaskTitle = data.nextTaskTitle
+                    state.activeThemeId = data.activeThemeId
+                    state.isShuffleEnabled = data.isShuffleEnabled
+                    state.shufflePoolIds = data.shufflePoolIds
+                    state.privacyModeEnabled = data.privacyModeEnabled
+                    state.fontScaleRaw = data.fontScaleRaw
+                    state.dailyProgressRatio = data.progressRatio
+                    state.streakCount = data.streak
+                    state.nextTaskId = data.nextTaskId
+                    state.nextTaskTitle = data.nextTaskTitle
 
-            if let deckTitle = data.deckTitle {
-                state.activeDeckTitle = deckTitle
-                state.totalCardsInDeck = data.cards.count
-                state.masteredCountInDeck = data.cards.filter(\.isMastered).count
-                if data.cards.isEmpty {
-                    state.currentCardId = nil
-                    state.currentCardQuestion = "Chưa có thẻ nào trong bộ đề."
-                    state.currentCardAnswer = ""
-                    state.currentCardIndex = 0
-                    state.isAnswerVisible = false
-                } else if let currentCardId = state.currentCardId,
-                          let matchedIndex = data.cards.firstIndex(where: { $0.id == currentCardId }) {
-                    let card = data.cards[matchedIndex]
-                    state.currentCardIndex = matchedIndex
-                    state.currentCardId = card.id
-                    state.currentCardQuestion = card.question
-                    state.currentCardAnswer = card.answer
+                    if let deckTitle = data.deckTitle {
+                        state.activeDeckTitle = deckTitle
+                        state.totalCardsInDeck = data.cards.count
+                        state.masteredCountInDeck = data.cards.filter(\.isMastered).count
+                        if data.cards.isEmpty {
+                            state.currentCardId = nil
+                            state.currentCardQuestion = "Chưa có thẻ nào trong bộ đề."
+                            state.currentCardAnswer = ""
+                            state.currentCardIndex = 0
+                            state.isAnswerVisible = false
+                        } else if let currentCardId = state.currentCardId,
+                                  let matchedIndex = data.cards.firstIndex(where: { $0.id == currentCardId }) {
+                            let card = data.cards[matchedIndex]
+                            state.currentCardIndex = matchedIndex
+                            state.currentCardId = card.id
+                            state.currentCardQuestion = card.question
+                            state.currentCardAnswer = card.answer
+                        } else {
+                            let safeIndex = min(max(0, state.currentCardIndex), data.cards.count - 1)
+                            let card = data.cards[safeIndex]
+                            state.currentCardIndex = safeIndex
+                            state.currentCardId = card.id
+                            state.currentCardQuestion = card.question
+                            state.currentCardAnswer = card.answer
+                            state.isAnswerVisible = !data.hideAnswerByDefault
+                        }
+                    } else if observedDeckId != nil {
+                        state.activeDeckId = nil
+                        state.activeDeckTitle = ""
+                        state.currentCardId = nil
+                        state.currentCardQuestion = ""
+                        state.currentCardAnswer = ""
+                        state.currentCardIndex = 0
+                        state.totalCardsInDeck = 0
+                        state.masteredCountInDeck = 0
+                        state.isAnswerVisible = false
+                    }
+                }
+
+                if let activeDeckId = updatedSnapshot.activeDeckId {
+                    let contentState = SharedCardNavigationEngine.makeContentState(from: updatedSnapshot)
+                    let content = ActivityContent(state: contentState, staleDate: nil)
+                    for activity in Activity<StudySessionAttributes>.activities {
+                        if activity.content.state.deckId == activeDeckId {
+                            await activity.update(content)
+                        } else {
+                            await activity.end(nil, dismissalPolicy: .immediate)
+                        }
+                    }
                 } else {
-                    let safeIndex = min(max(0, state.currentCardIndex), data.cards.count - 1)
-                    let card = data.cards[safeIndex]
-                    state.currentCardIndex = safeIndex
-                    state.currentCardId = card.id
-                    state.currentCardQuestion = card.question
-                    state.currentCardAnswer = card.answer
-                    state.isAnswerVisible = !data.hideAnswerByDefault
+                    for activity in Activity<StudySessionAttributes>.activities {
+                        await activity.end(nil, dismissalPolicy: .immediate)
+                    }
                 }
-            } else if snapshot.activeDeckId != nil && state.activeDeckId == snapshot.activeDeckId {
-                state.activeDeckId = nil
-                state.activeDeckTitle = ""
-                state.currentCardId = nil
-                state.currentCardQuestion = ""
-                state.currentCardAnswer = ""
-                state.currentCardIndex = 0
-                state.totalCardsInDeck = 0
-                state.masteredCountInDeck = 0
-                state.isAnswerVisible = false
+
+                WidgetCenter.shared.reloadAllTimelines()
+                CrossProcessNotifier.postStateDidChange()
+                return
+            } catch let error as AppGroupStorageError {
+                if case .staleSnapshotRevision = error, attempt < 2 {
+                    continue
+                }
+                throw error
             }
         }
-
-        if let activeDeckId = updatedSnapshot.activeDeckId {
-            let contentState = SharedCardNavigationEngine.makeContentState(from: updatedSnapshot)
-            let content = ActivityContent(state: contentState, staleDate: nil)
-            for activity in Activity<StudySessionAttributes>.activities {
-                if activity.content.state.deckId == activeDeckId {
-                    await activity.update(content)
-                } else {
-                    await activity.end(nil, dismissalPolicy: .immediate)
-                }
-            }
-        } else {
-            for activity in Activity<StudySessionAttributes>.activities {
-                await activity.end(nil, dismissalPolicy: .immediate)
-            }
-        }
-
-        WidgetCenter.shared.reloadAllTimelines()
-        CrossProcessNotifier.postStateDidChange()
     }
 
     public func renderStudyWallpaperPNG(deckId: UUID?, maxLines: Int) async throws -> WallpaperRenderPayload {

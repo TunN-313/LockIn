@@ -1,5 +1,5 @@
 // EncryptedBackupService.swift — Export/Import file .lockinbackup mã hóa AES-GCM bằng khóa PBKDF2 600,000 vòng.
-// Triển khai BackupModuleProtocol; chống xung đột UUID xuyên hồ sơ (remap ID + liên kết), kiểm tra PBKDF2/salt và tái đồng bộ Lock Screen.
+// Triển khai BackupModuleProtocol; ghim phiên ban đầu, giao dịch 1 lần save kèm rollback, remap UUID chéo hồ sơ và đồng bộ Lock Screen.
 
 import Foundation
 import SwiftData
@@ -196,7 +196,9 @@ public final class EncryptedBackupService: BackupModuleProtocol, @unchecked Send
     }
 
     public func importEncryptedBackup(_ data: Data, passphrase: String, mode: BackupRestoreMode) async throws {
-        _ = try isolationGuard.requireActiveSession()
+        // Ghim phiên ban đầu trước khi giải mã để chặn thao tác đổi hồ sơ giữa chừng ghi nhầm sang user khác.
+        let initialSession = try isolationGuard.requireActiveSession()
+
         guard data.count <= AppConstants.maxBackupFileBytes else {
             throw LockInDomainError.backupExceedsMaxSize
         }
@@ -243,247 +245,330 @@ public final class EncryptedBackupService: BackupModuleProtocol, @unchecked Send
             throw LockInDomainError.backupCorruptedOrWrongPassphrase
         }
 
-        let activeSession = try isolationGuard.requireActiveSession()
-        let uid = activeSession.userId
+        let sessionAfterDecrypt = try isolationGuard.requireActiveSession()
+        guard sessionAfterDecrypt == initialSession else {
+            throw AppGroupStorageError.sessionInvalidatedOrLoggedOut
+        }
+
+        let uid = initialSession.userId
 
         try await studyStore.perform { context in
-            // Quét trước tập UUID toàn kho (chỉ lấy ID & ownerUserId) để phát hiện xung đột/nhập chéo hồ sơ.
-            let allDecks = try context.fetch(FetchDescriptor<StudyDeck>())
-            let allCards = try context.fetch(FetchDescriptor<StudyCard>())
-            let allTasks = try context.fetch(FetchDescriptor<TaskItem>())
-            let allSchedules = try context.fetch(FetchDescriptor<StudySchedule>())
-
-            let foreignDeckIds = Set(allDecks.filter { $0.ownerUserId != uid }.map(\.id))
-            let foreignCardIds = Set(allCards.filter { $0.ownerUserId != uid }.map(\.id))
-            let foreignTaskIds = Set(allTasks.filter { $0.ownerUserId != uid }.map(\.id))
-            let foreignScheduleIds = Set(allSchedules.filter { $0.ownerUserId != uid }.map(\.id))
-
-            var occupiedDeckIds = Set(allDecks.map(\.id))
-            var occupiedCardIds = Set(allCards.map(\.id))
-            var occupiedTaskIds = Set(allTasks.map(\.id))
-            var occupiedScheduleIds = Set(allSchedules.map(\.id))
-
-            let hasForeignCollision =
-                payload.decks.contains { foreignDeckIds.contains($0.id) } ||
-                payload.cards.contains { foreignCardIds.contains($0.id) } ||
-                payload.tasks.contains { foreignTaskIds.contains($0.id) } ||
-                payload.schedules.contains { foreignScheduleIds.contains($0.id) }
-
-            let hasDifferentSourceOwner =
-                payload.decks.contains { $0.ownerUserId != uid } ||
-                payload.cards.contains { $0.ownerUserId != uid } ||
-                payload.tasks.contains { $0.ownerUserId != uid } ||
-                payload.schedules.contains { $0.ownerUserId != uid } ||
-                (payload.themePreference.map { $0.ownerUserId != uid } ?? false)
-
-            let shouldRemapAllIds = hasForeignCollision || hasDifferentSourceOwner
-
-            if mode == .overwrite {
-                for item in allDecks where item.ownerUserId == uid {
-                    occupiedDeckIds.remove(item.id)
-                    context.delete(item)
-                }
-                for item in allCards where item.ownerUserId == uid {
-                    occupiedCardIds.remove(item.id)
-                    context.delete(item)
-                }
-                for item in allTasks where item.ownerUserId == uid {
-                    occupiedTaskIds.remove(item.id)
-                    context.delete(item)
-                }
-                for item in allSchedules where item.ownerUserId == uid {
-                    occupiedScheduleIds.remove(item.id)
-                    context.delete(item)
-                }
-                for item in try context.fetch(FetchDescriptor<DailyProgress>(predicate: #Predicate<DailyProgress> { $0.ownerUserId == uid })) {
-                    context.delete(item)
-                }
-                // Lưu bước xóa trước khi chèn lại nhằm tránh xung đột @Attribute(.unique) của SwiftData trên cùng ngữ cảnh.
-                try context.save()
+            guard try isolationGuard.requireActiveSession() == initialSession else {
+                throw AppGroupStorageError.sessionInvalidatedOrLoggedOut
             }
 
-            var deckById: [UUID: StudyDeck] = [:]
-            for existingDeck in try context.fetch(FetchDescriptor<StudyDeck>(predicate: #Predicate<StudyDeck> { $0.ownerUserId == uid })) {
-                deckById[existingDeck.id] = existingDeck
-            }
-
-            var deckIdMap: [UUID: UUID] = [:]
-            for deckDTO in payload.decks {
-                let mappedDeckId = Self.allocateSafeUUID(
-                    preferred: deckDTO.id,
-                    forceRemap: shouldRemapAllIds,
-                    foreignIds: foreignDeckIds,
-                    occupiedIds: &occupiedDeckIds
+            do {
+                // Quét toàn kho trong một giao dịch duy nhất trước khi biến đổi; rollback toàn bộ nếu bất kỳ bước nào lỗi.
+                let allDecks = try context.fetch(FetchDescriptor<StudyDeck>())
+                let allCards = try context.fetch(FetchDescriptor<StudyCard>())
+                let allTasks = try context.fetch(FetchDescriptor<TaskItem>())
+                let allSchedules = try context.fetch(FetchDescriptor<StudySchedule>())
+                let ownProgresses = try context.fetch(
+                    FetchDescriptor<DailyProgress>(predicate: #Predicate<DailyProgress> { $0.ownerUserId == uid })
                 )
-                deckIdMap[deckDTO.id] = mappedDeckId
 
-                if let existing = deckById[mappedDeckId] {
-                    existing.title = deckDTO.title
-                    existing.subjectTag = deckDTO.subjectTag
-                    existing.accentHex = deckDTO.accentHex
-                    existing.examDate = deckDTO.examDate
-                    existing.dailyGoal = max(1, deckDTO.dailyGoal)
-                    existing.updatedAt = deckDTO.updatedAt
-                } else {
-                    let created = StudyDeck(
-                        id: mappedDeckId,
-                        ownerUserId: uid,
-                        title: deckDTO.title,
-                        subjectTag: deckDTO.subjectTag,
-                        accentHex: deckDTO.accentHex,
-                        examDate: deckDTO.examDate,
-                        dailyGoal: max(1, deckDTO.dailyGoal),
-                        createdAt: deckDTO.createdAt,
-                        updatedAt: deckDTO.updatedAt
+                let foreignDeckIds = Set(allDecks.filter { $0.ownerUserId != uid }.map(\.id))
+                let foreignCardIds = Set(allCards.filter { $0.ownerUserId != uid }.map(\.id))
+                let foreignTaskIds = Set(allTasks.filter { $0.ownerUserId != uid }.map(\.id))
+                let foreignScheduleIds = Set(allSchedules.filter { $0.ownerUserId != uid }.map(\.id))
+
+                var occupiedDeckIds = Set(allDecks.map(\.id))
+                var occupiedCardIds = Set(allCards.map(\.id))
+                var occupiedTaskIds = Set(allTasks.map(\.id))
+                var occupiedScheduleIds = Set(allSchedules.map(\.id))
+
+                var existingOwnDeckById: [UUID: StudyDeck] = [:]
+                for deck in allDecks where deck.ownerUserId == uid {
+                    existingOwnDeckById[deck.id] = deck
+                }
+                var existingOwnCardById: [UUID: StudyCard] = [:]
+                for card in allCards where card.ownerUserId == uid {
+                    existingOwnCardById[card.id] = card
+                }
+                var existingOwnTaskById: [UUID: TaskItem] = [:]
+                for task in allTasks where task.ownerUserId == uid {
+                    existingOwnTaskById[task.id] = task
+                }
+                var existingOwnScheduleById: [UUID: StudySchedule] = [:]
+                for schedule in allSchedules where schedule.ownerUserId == uid {
+                    existingOwnScheduleById[schedule.id] = schedule
+                }
+                var existingOwnProgressByDateKey: [String: DailyProgress] = [:]
+                for progress in ownProgresses {
+                    existingOwnProgressByDateKey[progress.dateKey] = progress
+                }
+
+                let hasForeignCollision =
+                    payload.decks.contains { foreignDeckIds.contains($0.id) } ||
+                    payload.cards.contains { foreignCardIds.contains($0.id) } ||
+                    payload.tasks.contains { foreignTaskIds.contains($0.id) } ||
+                    payload.schedules.contains { foreignScheduleIds.contains($0.id) }
+
+                let hasDifferentSourceOwner =
+                    payload.decks.contains { $0.ownerUserId != uid } ||
+                    payload.cards.contains { $0.ownerUserId != uid } ||
+                    payload.tasks.contains { $0.ownerUserId != uid } ||
+                    payload.schedules.contains { $0.ownerUserId != uid } ||
+                    (payload.themePreference.map { $0.ownerUserId != uid } ?? false)
+
+                let shouldRemapAllIds = hasForeignCollision || hasDifferentSourceOwner
+
+                var deckById: [UUID: StudyDeck] = mode == .merge ? existingOwnDeckById : [:]
+                var deckIdMap: [UUID: UUID] = [:]
+                var retainedDeckIds: Set<UUID> = []
+
+                for deckDTO in payload.decks {
+                    let mappedDeckId = Self.allocateSafeUUID(
+                        preferred: deckDTO.id,
+                        forceRemap: shouldRemapAllIds,
+                        foreignIds: foreignDeckIds,
+                        occupiedIds: &occupiedDeckIds
                     )
-                    context.insert(created)
-                    deckById[mappedDeckId] = created
+                    deckIdMap[deckDTO.id] = mappedDeckId
+                    retainedDeckIds.insert(mappedDeckId)
+
+                    if let existing = existingOwnDeckById[mappedDeckId] {
+                        existing.title = deckDTO.title
+                        existing.subjectTag = deckDTO.subjectTag
+                        existing.accentHex = deckDTO.accentHex
+                        existing.examDate = deckDTO.examDate
+                        existing.dailyGoal = max(1, deckDTO.dailyGoal)
+                        existing.createdAt = deckDTO.createdAt
+                        existing.updatedAt = deckDTO.updatedAt
+                        deckById[mappedDeckId] = existing
+                    } else {
+                        let created = StudyDeck(
+                            id: mappedDeckId,
+                            ownerUserId: uid,
+                            title: deckDTO.title,
+                            subjectTag: deckDTO.subjectTag,
+                            accentHex: deckDTO.accentHex,
+                            examDate: deckDTO.examDate,
+                            dailyGoal: max(1, deckDTO.dailyGoal),
+                            createdAt: deckDTO.createdAt,
+                            updatedAt: deckDTO.updatedAt
+                        )
+                        context.insert(created)
+                        deckById[mappedDeckId] = created
+                    }
                 }
-            }
 
-            let existingOwnCardIds = Set(
-                try context.fetch(FetchDescriptor<StudyCard>(predicate: #Predicate<StudyCard> { $0.ownerUserId == uid })).map(\.id)
-            )
-            for cardDTO in payload.cards {
-                let mappedCardId = Self.allocateSafeUUID(
-                    preferred: cardDTO.id,
-                    forceRemap: shouldRemapAllIds,
-                    foreignIds: foreignCardIds,
-                    occupiedIds: &occupiedCardIds
-                )
-                guard !existingOwnCardIds.contains(mappedCardId) else { continue }
+                // Xử lý thẻ trước khi xóa các bộ đề cũ không còn trong backup để tránh cascade delete xóa nhầm thẻ được giữ lại.
+                var retainedCardIds: Set<UUID> = []
+                for cardDTO in payload.cards {
+                    let mappedCardId = Self.allocateSafeUUID(
+                        preferred: cardDTO.id,
+                        forceRemap: shouldRemapAllIds,
+                        foreignIds: foreignCardIds,
+                        occupiedIds: &occupiedCardIds
+                    )
+                    retainedCardIds.insert(mappedCardId)
 
-                let parentDeck: StudyDeck?
-                if let mappedDeckId = deckIdMap[cardDTO.deckId] {
-                    parentDeck = deckById[mappedDeckId]
-                } else if !shouldRemapAllIds {
-                    parentDeck = deckById[cardDTO.deckId]
-                } else {
-                    parentDeck = nil
+                    let parentDeck: StudyDeck?
+                    if let mappedDeckId = deckIdMap[cardDTO.deckId] {
+                        parentDeck = deckById[mappedDeckId]
+                    } else if !shouldRemapAllIds {
+                        parentDeck = deckById[cardDTO.deckId]
+                    } else {
+                        parentDeck = nil
+                    }
+
+                    if let existing = existingOwnCardById[mappedCardId] {
+                        if mode == .overwrite {
+                            existing.deck = parentDeck
+                            existing.question = cardDTO.question
+                            existing.answer = cardDTO.answer
+                            existing.hintOrNote = cardDTO.hintOrNote
+                            existing.status = cardDTO.status
+                            existing.reviewCount = cardDTO.reviewCount
+                            existing.lastReviewedAt = cardDTO.lastReviewedAt
+                            existing.sortOrder = cardDTO.sortOrder
+                        }
+                    } else {
+                        let card = StudyCard(
+                            id: mappedCardId,
+                            ownerUserId: uid,
+                            deck: parentDeck,
+                            question: cardDTO.question,
+                            answer: cardDTO.answer,
+                            hintOrNote: cardDTO.hintOrNote,
+                            status: cardDTO.status,
+                            reviewCount: cardDTO.reviewCount,
+                            lastReviewedAt: cardDTO.lastReviewedAt,
+                            sortOrder: cardDTO.sortOrder
+                        )
+                        context.insert(card)
+                    }
                 }
 
-                let card = StudyCard(
-                    id: mappedCardId,
-                    ownerUserId: uid,
-                    deck: parentDeck,
-                    question: cardDTO.question,
-                    answer: cardDTO.answer,
-                    hintOrNote: cardDTO.hintOrNote,
-                    status: cardDTO.status,
-                    reviewCount: cardDTO.reviewCount,
-                    lastReviewedAt: cardDTO.lastReviewedAt,
-                    sortOrder: cardDTO.sortOrder
-                )
-                context.insert(card)
-            }
+                var retainedTaskIds: Set<UUID> = []
+                for taskDTO in payload.tasks {
+                    let mappedTaskId = Self.allocateSafeUUID(
+                        preferred: taskDTO.id,
+                        forceRemap: shouldRemapAllIds,
+                        foreignIds: foreignTaskIds,
+                        occupiedIds: &occupiedTaskIds
+                    )
+                    retainedTaskIds.insert(mappedTaskId)
 
-            let existingOwnTaskIds = Set(
-                try context.fetch(FetchDescriptor<TaskItem>(predicate: #Predicate<TaskItem> { $0.ownerUserId == uid })).map(\.id)
-            )
-            for taskDTO in payload.tasks {
-                let mappedTaskId = Self.allocateSafeUUID(
-                    preferred: taskDTO.id,
-                    forceRemap: shouldRemapAllIds,
-                    foreignIds: foreignTaskIds,
-                    occupiedIds: &occupiedTaskIds
-                )
-                guard !existingOwnTaskIds.contains(mappedTaskId) else { continue }
-
-                let remappedLinkedDeckId: UUID?
-                if let sourceDeckId = taskDTO.linkedDeckId {
-                    if let mappedDeckId = deckIdMap[sourceDeckId], deckById[mappedDeckId] != nil {
-                        remappedLinkedDeckId = mappedDeckId
-                    } else if !shouldRemapAllIds, deckById[sourceDeckId] != nil {
-                        remappedLinkedDeckId = sourceDeckId
+                    let remappedLinkedDeckId: UUID?
+                    if let sourceDeckId = taskDTO.linkedDeckId {
+                        if let mappedDeckId = deckIdMap[sourceDeckId], deckById[mappedDeckId] != nil {
+                            remappedLinkedDeckId = mappedDeckId
+                        } else if !shouldRemapAllIds, deckById[sourceDeckId] != nil {
+                            remappedLinkedDeckId = sourceDeckId
+                        } else {
+                            remappedLinkedDeckId = nil
+                        }
                     } else {
                         remappedLinkedDeckId = nil
                     }
-                } else {
-                    remappedLinkedDeckId = nil
+
+                    if let existing = existingOwnTaskById[mappedTaskId] {
+                        if mode == .overwrite {
+                            existing.title = taskDTO.title
+                            existing.notes = taskDTO.notes
+                            existing.dueDate = taskDTO.dueDate
+                            existing.priority = taskDTO.priority
+                            existing.isCompleted = taskDTO.isCompleted
+                            existing.completedAt = taskDTO.completedAt
+                            existing.linkedDeckId = remappedLinkedDeckId
+                        }
+                    } else {
+                        let task = TaskItem(
+                            id: mappedTaskId,
+                            ownerUserId: uid,
+                            title: taskDTO.title,
+                            notes: taskDTO.notes,
+                            dueDate: taskDTO.dueDate,
+                            priority: taskDTO.priority,
+                            isCompleted: taskDTO.isCompleted,
+                            completedAt: taskDTO.completedAt,
+                            linkedDeckId: remappedLinkedDeckId
+                        )
+                        context.insert(task)
+                    }
                 }
 
-                let task = TaskItem(
-                    id: mappedTaskId,
-                    ownerUserId: uid,
-                    title: taskDTO.title,
-                    notes: taskDTO.notes,
-                    dueDate: taskDTO.dueDate,
-                    priority: taskDTO.priority,
-                    isCompleted: taskDTO.isCompleted,
-                    completedAt: taskDTO.completedAt,
-                    linkedDeckId: remappedLinkedDeckId
-                )
-                context.insert(task)
-            }
+                var retainedScheduleIds: Set<UUID> = []
+                for scheduleDTO in payload.schedules {
+                    let mappedScheduleId = Self.allocateSafeUUID(
+                        preferred: scheduleDTO.id,
+                        forceRemap: shouldRemapAllIds,
+                        foreignIds: foreignScheduleIds,
+                        occupiedIds: &occupiedScheduleIds
+                    )
 
-            let existingOwnScheduleIds = Set(
-                try context.fetch(FetchDescriptor<StudySchedule>(predicate: #Predicate<StudySchedule> { $0.ownerUserId == uid })).map(\.id)
-            )
-            for scheduleDTO in payload.schedules {
-                let mappedScheduleId = Self.allocateSafeUUID(
-                    preferred: scheduleDTO.id,
-                    forceRemap: shouldRemapAllIds,
-                    foreignIds: foreignScheduleIds,
-                    occupiedIds: &occupiedScheduleIds
-                )
-                guard !existingOwnScheduleIds.contains(mappedScheduleId) else { continue }
+                    let remappedDeckId: UUID?
+                    if let mappedId = deckIdMap[scheduleDTO.deckId], deckById[mappedId] != nil {
+                        remappedDeckId = mappedId
+                    } else if !shouldRemapAllIds, deckById[scheduleDTO.deckId] != nil {
+                        remappedDeckId = scheduleDTO.deckId
+                    } else {
+                        remappedDeckId = nil
+                    }
+                    guard let validDeckId = remappedDeckId else { continue }
 
-                let remappedDeckId: UUID?
-                if let mappedId = deckIdMap[scheduleDTO.deckId], deckById[mappedId] != nil {
-                    remappedDeckId = mappedId
-                } else if !shouldRemapAllIds, deckById[scheduleDTO.deckId] != nil {
-                    remappedDeckId = scheduleDTO.deckId
-                } else {
-                    remappedDeckId = nil
+                    retainedScheduleIds.insert(mappedScheduleId)
+
+                    if let existing = existingOwnScheduleById[mappedScheduleId] {
+                        if mode == .overwrite {
+                            existing.deckId = validDeckId
+                            existing.title = scheduleDTO.title
+                            existing.hour = scheduleDTO.hour
+                            existing.minute = scheduleDTO.minute
+                            existing.weekdaysMask = scheduleDTO.weekdaysMask
+                            existing.isEnabled = scheduleDTO.isEnabled
+                            existing.autoRotateTheme = scheduleDTO.autoRotateTheme
+                        }
+                    } else {
+                        let schedule = StudySchedule(
+                            id: mappedScheduleId,
+                            ownerUserId: uid,
+                            deckId: validDeckId,
+                            title: scheduleDTO.title,
+                            hour: scheduleDTO.hour,
+                            minute: scheduleDTO.minute,
+                            weekdaysMask: scheduleDTO.weekdaysMask,
+                            isEnabled: scheduleDTO.isEnabled,
+                            autoRotateTheme: scheduleDTO.autoRotateTheme
+                        )
+                        context.insert(schedule)
+                    }
                 }
-                guard let validDeckId = remappedDeckId else { continue }
 
-                let schedule = StudySchedule(
-                    id: mappedScheduleId,
-                    ownerUserId: uid,
-                    deckId: validDeckId,
-                    title: scheduleDTO.title,
-                    hour: scheduleDTO.hour,
-                    minute: scheduleDTO.minute,
-                    weekdaysMask: scheduleDTO.weekdaysMask,
-                    isEnabled: scheduleDTO.isEnabled,
-                    autoRotateTheme: scheduleDTO.autoRotateTheme
-                )
-                context.insert(schedule)
+                if let restoredPref = payload.themePreference {
+                    let pref = try ThemeCatalogService.fetchOrCreatePreference(for: uid, in: context)
+                    let validThemeIds = Set(ThemePalette.allBuiltIn.map(\.id))
+                    let sanitizedPool = restoredPref.shufflePoolIds.filter { validThemeIds.contains($0) }
+                    pref.activeThemeId = ThemePalette.palette(for: restoredPref.activeThemeId).id
+                    pref.isShuffleEnabled = restoredPref.isShuffleEnabled
+                    pref.shufflePoolIds = sanitizedPool.isEmpty ? [pref.activeThemeId] : sanitizedPool
+                    pref.rotateOnAppOpen = restoredPref.rotateOnAppOpen
+                    pref.rotateOnShortcutTrigger = restoredPref.rotateOnShortcutTrigger
+                    pref.fontScale = restoredPref.lockScreenFontScale
+                    pref.hideAnswerByDefault = restoredPref.hideAnswerByDefault
+                    pref.privacyModeEnabled = restoredPref.privacyModeEnabled
+                    pref.showPopupOnOpen = restoredPref.showPopupOnOpen
+                }
+
+                var retainedProgressKeys: Set<String> = []
+                for progressDTO in payload.dailyProgresses {
+                    guard !retainedProgressKeys.contains(progressDTO.dateKey) else { continue }
+                    retainedProgressKeys.insert(progressDTO.dateKey)
+
+                    if let existing = existingOwnProgressByDateKey[progressDTO.dateKey] {
+                        if mode == .overwrite {
+                            existing.cardsReviewed = progressDTO.cardsReviewed
+                            existing.cardsMastered = progressDTO.cardsMastered
+                            existing.tasksCompleted = progressDTO.tasksCompleted
+                            existing.dailyTargetCount = progressDTO.dailyTargetCount
+                            existing.streakCount = progressDTO.streakCount
+                        }
+                    } else {
+                        let progress = DailyProgress(
+                            ownerUserId: uid,
+                            dateKey: progressDTO.dateKey,
+                            cardsReviewed: progressDTO.cardsReviewed,
+                            cardsMastered: progressDTO.cardsMastered,
+                            tasksCompleted: progressDTO.tasksCompleted,
+                            dailyTargetCount: progressDTO.dailyTargetCount,
+                            streakCount: progressDTO.streakCount
+                        )
+                        context.insert(progress)
+                    }
+                }
+
+                if mode == .overwrite {
+                    for card in existingOwnCardById.values where !retainedCardIds.contains(card.id) {
+                        context.delete(card)
+                    }
+                    for deck in existingOwnDeckById.values where !retainedDeckIds.contains(deck.id) {
+                        context.delete(deck)
+                    }
+                    for task in existingOwnTaskById.values where !retainedTaskIds.contains(task.id) {
+                        context.delete(task)
+                    }
+                    for schedule in existingOwnScheduleById.values where !retainedScheduleIds.contains(schedule.id) {
+                        context.delete(schedule)
+                    }
+                    for progress in ownProgresses where !retainedProgressKeys.contains(progress.dateKey) {
+                        context.delete(progress)
+                    }
+                }
+
+                guard try isolationGuard.requireActiveSession() == initialSession else {
+                    throw AppGroupStorageError.sessionInvalidatedOrLoggedOut
+                }
+                try context.save()
+            } catch {
+                context.rollback()
+                throw error
             }
+        }
 
-            if let restoredPref = payload.themePreference {
-                let pref = try ThemeCatalogService.fetchOrCreatePreference(for: uid, in: context)
-                let validThemeIds = Set(ThemePalette.allBuiltIn.map(\.id))
-                let sanitizedPool = restoredPref.shufflePoolIds.filter { validThemeIds.contains($0) }
-                pref.activeThemeId = ThemePalette.palette(for: restoredPref.activeThemeId).id
-                pref.isShuffleEnabled = restoredPref.isShuffleEnabled
-                pref.shufflePoolIds = sanitizedPool.isEmpty ? [pref.activeThemeId] : sanitizedPool
-                pref.rotateOnAppOpen = restoredPref.rotateOnAppOpen
-                pref.rotateOnShortcutTrigger = restoredPref.rotateOnShortcutTrigger
-                pref.fontScale = restoredPref.lockScreenFontScale
-                pref.hideAnswerByDefault = restoredPref.hideAnswerByDefault
-                pref.privacyModeEnabled = restoredPref.privacyModeEnabled
-                pref.showPopupOnOpen = restoredPref.showPopupOnOpen
-            }
-
-            let existingProgressKeys = Set(
-                try context.fetch(FetchDescriptor<DailyProgress>(predicate: #Predicate<DailyProgress> { $0.ownerUserId == uid })).map(\.dateKey)
-            )
-            for progressDTO in payload.dailyProgresses where !existingProgressKeys.contains(progressDTO.dateKey) {
-                let progress = DailyProgress(
-                    ownerUserId: uid,
-                    dateKey: progressDTO.dateKey,
-                    cardsReviewed: progressDTO.cardsReviewed,
-                    cardsMastered: progressDTO.cardsMastered,
-                    tasksCompleted: progressDTO.tasksCompleted,
-                    dailyTargetCount: progressDTO.dailyTargetCount,
-                    streakCount: progressDTO.streakCount
-                )
-                context.insert(progress)
-            }
-
-            try context.save()
+        guard try isolationGuard.requireActiveSession() == initialSession else {
+            throw AppGroupStorageError.sessionInvalidatedOrLoggedOut
         }
 
         // Dựng lại toàn bộ LockScreenSnapshot, cập nhật/kết thúc Live Activity và đồng bộ lịch thông báo sau import.
