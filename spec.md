@@ -12,7 +12,7 @@
 - **Định hướng hiển thị:** Màn hình dọc cố định (**Portrait-only**).
 - **Bài toán & Mục tiêu cốt lõi:**
   - Người dùng (đặc biệt là học sinh/sinh viên ôn thi) thường cầm điện thoại lên xem giờ hoặc kiểm tra thông báo rồi mới nhận ra mình quên ôn bài.
-  - `LockIn` đưa trực tiếp tài liệu ôn thi (flashcard câu hỏi/đáp án, ghi chú ngắn, công việc ưu tiên) lên **Lock Screen** để khi bật sáng màn hình là thấy ngay nội dung cần ôn và **chạm chuyển thẻ / lật đáp án / đánh dấu đã thuộc ngay trên màn hình khóa** mà không cần mở khóa máy hay mở app.
+  - `LockIn` đưa trực tiếp tài liệu ôn thi (flashcard câu hỏi/đáp án, ghi chú ngắn, công việc ưu tiên) lên **Lock Screen** để khi bật sáng màn hình là thấy ngay nội dung cần ôn (khi tắt Privacy Mode), và sau khi iOS xác thực thiết bị (Face ID / Touch ID / mật mã) theo chính sách bảo mật WidgetKit/ActivityKit, người dùng chạm chuyển thẻ / lật đáp án / đánh dấu đã thuộc **ngay trên màn hình khóa mà không cần mở app (`openAppWhenRun = false`)**.
 - **Lộ trình phát triển:**
   - **Phase 1 (MVP — Hiện tại):** Native iOS, lưu trữ và xử lý hoàn toàn cục bộ (Local-first), đồ họa tối giản dễ vibe-code, tối ưu chi phí **\$0** bằng quy trình build `.ipa` qua GitHub Actions (`macos-latest`) và cài lên iPhone thông qua AltStore / SideStore / Sideloadly.
   - **Phase 2 (Mở rộng sau MVP):** Nâng cấp phân phối lên **TestFlight / App Store** (khi có tài khoản Apple Developer \$99/năm), đồng bộ đám mây (Cloud Sync), thuật toán lặp lại ngắt quãng (**Spaced Repetition — SM-2**), nhập liệu từ ảnh/PDF (OCR), Pomodoro, và mở rộng sang phiên bản **Android**.
@@ -37,10 +37,10 @@ Dự án được cấu trúc thành 3 targets chính trong `project.yml`:
 - **Shared App Group (`group.com.lockin.shared`):**
   - Cả `LockInApp` và `LockInWidgetsExtension` dùng chung container của App Group để đồng bộ dữ liệu thẻ ôn, tiến độ ngày và theme hiện tại.
   - Toàn bộ thư mục `Shared/` (gồm `Config`, `Models`, `Storage`, `Themes`, `IPC`, `ExtensionCore`, `Intents`) bắt buộc khai báo biên dịch trong **cả 2 targets** `LockInApp` và `LockInWidgetsExtension` trong `project.yml` để tránh lỗi thiếu symbol xuyên target (đặc biệt với các `LiveActivityIntent`).
-  - Toàn bộ hằng số Bundle ID và App Group Identifier phải đặt tập trung tại một cấu hình chung (`AppConstants.swift`) và đọc động fallback khi có thể, giúp tương thích khi các công cụ sideload miễn phí viết lại Bundle ID.
+  - Toàn bộ hằng số Bundle ID và App Group Identifier phải đặt tập trung tại một cấu hình chung (`AppConstants.swift`) với bộ lọc tất định chỉ dành cho các App Group thuộc phạm vi `LockIn` (loại bỏ mọi App Group không liên quan của app khác và kiểm tra `containerURL`), bảo đảm cả `LockInApp` và `LockInWidgetsExtension` luôn hội tụ về đúng một container chung duy nhất và mang cùng một `com.apple.security.application-groups` entitlement trong chữ ký sau khi resign.
 
-### 2.3. Lưu ý kỹ thuật cho phân phối miễn phí \$0 (Free Apple ID Sideload)
-- **Giới hạn 3 App IDs:** Apple ID miễn phí chỉ cho phép tối đa **3 App IDs hoạt động đồng thời** trên thiết bị và chứng chỉ hết hạn mỗi **7 ngày** (có thể tự gia hạn qua Wi-Fi với SideStore/AltStore). Vì vậy, Phase 1 chỉ sử dụng đúng **2 targets** (`LockInApp` + `LockInWidgetsExtension`), không tách thêm Extension phụ (như Share Extension hay Notification Service Extension) để không vượt giới hạn.
+### 2.3. Lưu ý kỹ thuật cho phân phối miễn phí \$0 (Personal Team / Free Apple ID Sideload)
+- **Giới hạn Personal Team (Apple ID miễn phí):** Tài khoản Apple ID miễn phí hỗ trợ tối đa **10 App IDs trong vòng 7 ngày**, tối đa **3 ứng dụng cài đặt hoạt động cùng lúc trên mỗi thiết bị**, và provisioning profile hết hạn sau **7 ngày** (có thể tự gia hạn qua Wi-Fi với SideStore/AltStore). Vì vậy, Phase 1 chỉ sử dụng đúng **2 targets** (`LockInApp` + `LockInWidgetsExtension`), tiêu tốn 2/10 App IDs và chiếm 1/3 slot ứng dụng cài trên thiết bị, không tách thêm Extension phụ (Share Extension hay Notification Service Extension).
 - **Không phụ thuộc APNs Push:** Tài khoản Apple ID miễn phí không có quyền dùng Push Notification server (`aps-environment`). Kiến trúc `LockIn` chạy **Live Activity hoàn toàn cục bộ** bằng `ActivityKit` + `AppIntents` + `UserNotifications`, đảm bảo mọi tính năng cốt lõi hoạt động 100% ở chế độ \$0.
 
 ### 2.4. Kiến trúc mã nguồn: Tách biệt `Backend/` và `Frontend/` (Modular MVVM + Sync Contract)
@@ -281,7 +281,7 @@ LockIn/
 ## 4. Đặc tả cơ chế Lock Screen (`LockScreenBridge`)
 
 ### 4.1. Interactive Live Activity (`StudySessionAttributes`) — Cơ chế chính
-- **Mục tiêu trải nghiệm:** Thẻ ôn nằm cố định trên Lock Screen ngay dưới đồng hồ (và trên Dynamic Island ở các dòng iPhone hỗ trợ). Người dùng chạm trực tiếp vào các nút trên thẻ mà **không mở khóa máy** và **không bị nhảy vào trong app**.
+- **Mục tiêu trải nghiệm:** Thẻ ôn nằm cố định trên Lock Screen ngay dưới đồng hồ (và trên Dynamic Island ở các dòng iPhone hỗ trợ). Người dùng đọc ngay nội dung thẻ khi bật sáng màn hình (nếu tắt Privacy Mode); khi chạm vào các nút tương tác trên Live Activity / Widget, iOS yêu cầu **xác thực / mở khóa thiết bị (Face ID / Touch ID / mật mã)** trước khi thực thi `LiveActivityIntent` / `AppIntent`, sau đó cập nhật trực tiếp trên Lock Screen và **không bị nhảy vào trong app (`openAppWhenRun = false`)**.
 - **Giao diện trên Lock Screen:**
   - Header nhỏ: Tên bộ đề + vị trí thẻ (`3/15`) + thanh Progress Bar.
   - Body: Nội dung câu hỏi (hoặc đáp án khi đã bấm lật), font rõ ràng, màu sắc lấy theo `ThemePalette` đang hoạt động.
@@ -318,10 +318,10 @@ LockIn/
    - **Phân tách rõ 3 vùng lưu trữ theo mức độ nhạy cảm và ngữ cảnh thực thi:**
      1. *Khóa bảo vệ App Lock (`biometricUnlockSecret`):* Lưu trong Keychain gắn **`.biometryCurrentSet`**, **CHỈ đọc khi mở khóa app ở foreground**.
      2. *Session token (`activeUserId` / phiên đăng nhập) & bản băm PIN 6 số dự phòng:* Lưu trong **iOS Keychain** với cờ `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` (**KHÔNG gắn `.biometryCurrentSet`**).
-     3. *Snapshot hiển thị Lock Screen không nhạy cảm (`activeUserId`, thẻ hiện tại, `snapshotVersion`, `activeThemeId`):* Lưu trong **Shared App Group** (`AppGroupSnapshotStore` / `SharedStoreContainer`) để `LiveActivityIntent` / `AppIntent` / Widget chạy nền đọc ghi bình thường khi máy đang khóa; toàn bộ snapshot này phải **xóa sạch khi đăng xuất**.
+     3. *Snapshot hiển thị Lock Screen không nhạy cảm (`activeUserId`, thẻ hiện tại, `snapshotVersion`, `activeThemeId`):* Lưu trong **Shared App Group** (`AppGroupSnapshotStore` / `SharedStoreContainer`) để `LiveActivityIntent` / `AppIntent` / Widget thực thi ngoài foreground (khi hệ thống làm mới timeline nền hoặc sau khi iOS xác thực thiết bị cho thao tác bấm nút) đọc ghi bình thường; toàn bộ snapshot này phải **xóa sạch khi đăng xuất**.
 3. **Khóa Sinh trắc học & Mã PIN dự phòng (`App Lock Gate`):**
    - **Bảo vệ sinh trắc học thật ở tầng Keychain (khoanh vùng đúng phạm vi):** Lưu bí mật mở khóa sinh trắc học (`biometricUnlockSecret`) của **App Lock** trong iOS Keychain bằng **`SecAccessControlCreateWithFlags`** với cờ **`.biometryCurrentSet`** và mức truy cập **`kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`**. Việc đọc item này buộc iOS xác thực phần cứng Secure Enclave cho Face ID / Touch ID hiện tại ở foreground; nếu sinh trắc học trên máy bị thêm/xóa/thay đổi, item tự động vô hiệu hóa để ngăn qua mặt.
-   - **Cấm áp dụng `.biometryCurrentSet` đại trà:** **TUYỆT ĐỐI KHÔNG** gắn `.biometryCurrentSet` lên `session token`, bản băm PIN 6 số, hay bất kỳ dữ liệu nào mà `LiveActivityIntent` / `AppIntent` / Widget chạy nền trên Lock Screen cần truy cập — vì các mục gắn sinh trắc sẽ đòi Face ID hoặc trả lỗi khi đọc ở chế độ nền lúc màn hình đang khóa.
+   - **Cấm áp dụng `.biometryCurrentSet` đại trà:** **TUYỆT ĐỐI KHÔNG** gắn `.biometryCurrentSet` lên `session token`, bản băm PIN 6 số, hay bất kỳ dữ liệu nào mà `LiveActivityIntent` / `AppIntent` / Widget chạy nền ngoài app cần truy cập — vì các mục gắn sinh trắc sẽ đòi Face ID ở lớp dữ liệu nền hoặc trả lỗi khi hệ thống làm mới timeline ngoài foreground.
    - Yêu cầu thiết lập mã **PIN 6 số** dự phòng (băm bằng **PBKDF2-HMAC-SHA256 `600,000` vòng** + 16-byte random salt, lưu tách biệt trong Keychain không gắn `.biometryCurrentSet`). Sau 5 lần nhập sai PIN liên tiếp, áp dụng khóa tạm thời (cooldown 30 giây → tăng dần). Khi `.biometryCurrentSet` bị vô hiệu hóa do đổi Face ID/Touch ID, người dùng mở khóa bằng **mật khẩu tài khoản hoặc mã PIN 6 số** để hệ thống cấp lại item sinh trắc học mới.
 4. **Privacy Mode trên Lock Screen:**
    - Cung cấp tùy chọn **Privacy Mode** trong Settings.
@@ -409,7 +409,7 @@ Phase 1 được coi là hoàn thành khi đạt **100%** các tiêu chí sau:
   - Hiển thị Pop-up nhắc việc khi mở app nếu còn task hoặc thẻ đến hạn.
 - [ ] **Tab 3 (`SettingsTabView`) & `LockScreenModule`:**
   - Setup Wizard hiển thị đúng trạng thái quyền Live Activities, Notifications và hướng dẫn cài iOS Shortcut (theo các trigger hợp lệ của iOS); hỗ trợ xuất/lưu ảnh tóm tắt bài ôn vào Photos để đặt hình nền thủ công.
-  - Bật Live Activity từ trong app (`Activity.request` khi foreground) hiển thị thẻ rõ nét trên Lock Screen; 4 nút `LiveActivityIntent` (`Trước` / `Lật đáp án` / `Đã thuộc` / `Tiếp`, `openAppWhenRun = false`) cập nhật tức thì qua `Shared/ExtensionCore/` mà không mở app; đồng bộ ngược lại `LockInApp` cả khi ở foreground (qua Darwin Notification) lẫn khi trở lại từ background (`scenePhase == .active`).
+  - Bật Live Activity từ trong app (`Activity.request` khi foreground) hiển thị thẻ rõ nét trên Lock Screen; kiểm thử **cả trước và sau xác thực thiết bị**: khi máy còn khóa, chạm nút trên Live Activity/Widget sẽ yêu cầu xác thực (Face ID / Touch ID / mật mã) theo chính sách iOS; sau khi xác thực, 4 nút `LiveActivityIntent` (`Trước` / `Lật đáp án` / `Đã thuộc` / `Tiếp`, `openAppWhenRun = false`) cập nhật tức thì trên Lock Screen qua `Shared/ExtensionCore/` mà **không nhảy vào app**, đồng thời đồng bộ hai chiều với `LockInApp` cả khi ở foreground (qua Darwin Notification) lẫn khi trở lại từ background (`scenePhase == .active`).
   - `StartStudyActivityIntent` đặt `openAppWhenRun = true` mở app lên foreground để khởi động lại phiên mới sau khi hết hạn 8–12 giờ.
   - Bật Privacy Mode ẩn nội dung thẻ khi chưa quét Face ID; tắt Privacy Mode hiển thị rõ nội dung để ôn trực tiếp.
   - Lock Screen Widgets (`accessoryCircular`, `accessoryRectangular`) hiển thị đúng tiến độ/task và tương tác được.

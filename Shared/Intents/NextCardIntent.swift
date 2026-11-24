@@ -6,7 +6,7 @@ import Foundation
 
 public struct NextCardIntent: LiveActivityIntent {
     public static var title: LocalizedStringResource = "Thẻ ôn tiếp theo"
-    public static var description = IntentDescription("Chuyển sang thẻ kế tiếp trên Live Activity mà không cần mở khóa.")
+    public static var description = IntentDescription("Chuyển sang thẻ kế tiếp ngay trên Live Activity mà không cần mở ứng dụng.")
     public static var openAppWhenRun: Bool = false
 
     public init() {}

@@ -6,7 +6,7 @@ import Foundation
 
 public struct FlipCardIntent: LiveActivityIntent {
     public static var title: LocalizedStringResource = "Lật đáp án thẻ ôn"
-    public static var description = IntentDescription("Lật giữa câu hỏi và đáp án trên Live Activity mà không cần mở khóa.")
+    public static var description = IntentDescription("Lật giữa câu hỏi và đáp án ngay trên Live Activity mà không cần mở ứng dụng.")
     public static var openAppWhenRun: Bool = false
 
     public init() {}

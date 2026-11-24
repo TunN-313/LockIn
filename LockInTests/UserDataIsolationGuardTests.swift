@@ -270,4 +270,65 @@ final class UserDataIsolationGuardTests: XCTestCase {
         )
         XCTAssertEqual(hostFallback, AppConstants.defaultAppGroupIdentifier)
     }
+
+    func testAppGroupResolutionConvergesDeterministicallyAcrossAppAndWidgetIgnoringUnrelatedGroups() throws {
+        // 1. Profile của LockInApp liệt kê group của app khác đứng trước, và cả 2 container đều tồn tại:
+        //    cả LockInApp và LockInWidgetsExtension phải bỏ qua group lạ và hội tụ về cùng group LockIn.
+        let appResolvedWithUnrelatedFirst = AppConstants.resolveAppGroupIdentifier(
+            infoPlistGroupId: AppConstants.defaultAppGroupIdentifier,
+            mobileProvisionGroups: ["group.com.other.unrelated", "group.com.lockin.shared.TEAM999"],
+            bundleIdentifier: "com.lockin.app.TEAM999",
+            isContainerAvailable: { groupId in
+                groupId == "group.com.other.unrelated" || groupId == "group.com.lockin.shared.TEAM999"
+            }
+        )
+        let widgetResolved = AppConstants.resolveAppGroupIdentifier(
+            infoPlistGroupId: AppConstants.defaultAppGroupIdentifier,
+            mobileProvisionGroups: ["group.com.lockin.shared.TEAM999"],
+            bundleIdentifier: "com.lockin.app.TEAM999.widgets",
+            isContainerAvailable: { $0 == "group.com.lockin.shared.TEAM999" }
+        )
+        XCTAssertEqual(appResolvedWithUnrelatedFirst, "group.com.lockin.shared.TEAM999")
+        XCTAssertEqual(widgetResolved, "group.com.lockin.shared.TEAM999")
+
+        // 2. Hai profile có thứ tự ngược nhau + wildcard group.* phải chọn kết quả giống hệt nhau.
+        let profileAResolved = AppConstants.resolveAppGroupIdentifier(
+            infoPlistGroupId: AppConstants.defaultAppGroupIdentifier,
+            mobileProvisionGroups: ["group.*", "group.com.lockin.shared.TEAMB", "group.com.lockin.shared.TEAMA"],
+            bundleIdentifier: "com.lockin.app.TEAMA",
+            isContainerAvailable: {
+                $0 == "group.com.lockin.shared.TEAMB" || $0 == "group.com.lockin.shared.TEAMA"
+            }
+        )
+        let profileBResolved = AppConstants.resolveAppGroupIdentifier(
+            infoPlistGroupId: AppConstants.defaultAppGroupIdentifier,
+            mobileProvisionGroups: ["group.com.lockin.shared.TEAMA", "group.com.lockin.shared.TEAMB"],
+            bundleIdentifier: "com.lockin.app.TEAMA.widgets",
+            isContainerAvailable: {
+                $0 == "group.com.lockin.shared.TEAMB" || $0 == "group.com.lockin.shared.TEAMA"
+            }
+        )
+        XCTAssertEqual(profileAResolved, "group.com.lockin.shared.TEAMA")
+        XCTAssertEqual(profileBResolved, "group.com.lockin.shared.TEAMA")
+
+        // 3. Exact Info.plist group ưu tiên hơn nhóm hậu tố khi cả hai đều khả dụng.
+        let exactInfoWins = AppConstants.resolveAppGroupIdentifier(
+            infoPlistGroupId: AppConstants.defaultAppGroupIdentifier,
+            mobileProvisionGroups: ["group.com.lockin.shared.TEAM999", AppConstants.defaultAppGroupIdentifier],
+            bundleIdentifier: AppConstants.defaultBundleIdentifier,
+            isContainerAvailable: {
+                $0 == "group.com.lockin.shared.TEAM999" || $0 == AppConstants.defaultAppGroupIdentifier
+            }
+        )
+        XCTAssertEqual(exactInfoWins, AppConstants.defaultAppGroupIdentifier)
+
+        // 4. Fallback không container với profile chỉ chứa group lạ & wildcard vẫn giữ mặc định LockIn.
+        let unrelatedFallback = AppConstants.resolveAppGroupIdentifier(
+            infoPlistGroupId: nil,
+            mobileProvisionGroups: ["group.*", "group.com.other.unrelated"],
+            bundleIdentifier: AppConstants.defaultBundleIdentifier,
+            isContainerAvailable: { _ in false }
+        )
+        XCTAssertEqual(unrelatedFallback, AppConstants.defaultAppGroupIdentifier)
+    }
 }

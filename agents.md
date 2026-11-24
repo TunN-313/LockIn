@@ -96,15 +96,15 @@
 
 ### 5.1. Kỹ thuật iOS & Sideload miễn phí \$0
 - **Quản lý Project bằng XcodeGen:** Không bao giờ tạo hoặc chỉnh tay file `.pbxproj`. Mọi target, entitlements, Info.plist và đường dẫn file khai báo trong `project.yml`. Toàn bộ `Shared/**` phải gắn vào **cả `LockInApp` và `LockInWidgetsExtension`**.
-- **Giới hạn 2 App Targets (Free Apple ID 3-App-ID Limit):** Phase 1 chỉ duy trì đúng `LockInApp` và `LockInWidgetsExtension` (kèm `LockInTests` chỉ chạy lúc test). Tuyệt đối không tạo thêm Extension phụ khác.
+- **Giới hạn 2 App Targets (Personal Team Free Apple ID Limits: tối đa 10 App IDs/7 ngày, tối đa 3 ứng dụng cài đặt hoạt động cùng lúc trên thiết bị, hết hạn sau 7 ngày):** Phase 1 chỉ duy trì đúng `LockInApp` và `LockInWidgetsExtension` (kèm `LockInTests` chỉ chạy lúc test), tiêu tốn 2/10 App IDs và chiếm 1/3 slot ứng dụng trên thiết bị. Tuyệt đối không tạo thêm Extension phụ khác.
 - **Không dùng APNs / Remote Push:** Không khai báo entitlement `aps-environment`.
 - **`LiveActivityIntent` & `StartStudyActivityIntent` (`openAppWhenRun`):**
-  - 4 Intent tương tác thẻ (`FlipCardIntent`, `NextCardIntent`, `PrevCardIntent`, `MarkMasteredIntent`) **bắt buộc conform `LiveActivityIntent`**, đặt `openAppWhenRun = false` và compile ở cả 2 targets.
+  - 4 Intent tương tác thẻ (`FlipCardIntent`, `NextCardIntent`, `PrevCardIntent`, `MarkMasteredIntent`) **bắt buộc conform `LiveActivityIntent`**, đặt `openAppWhenRun = false` và compile ở cả 2 targets. Theo chính sách WidgetKit/ActivityKit của Apple, người dùng phải xác thực/mở khóa thiết bị (Face ID / Touch ID / mật mã) trước khi nút Live Activity hoặc Widget thực thi, còn `openAppWhenRun = false` giữ người dùng trên Lock Screen mà không nhảy vào app; kiểm thử nghiệm thu phải xác minh cả trước và sau xác thực.
   - Vì `Activity.request(...)` yêu cầu app ở foreground (khi không có APNs push-to-start), **`StartStudyActivityIntent` BẮT BUỘC đặt `static var openAppWhenRun: Bool = true`**. Khi Live Activity hết hạn 8–12 giờ, người dùng phải mở app để khởi tạo lại phiên mới.
 - **iOS Shortcuts Triggers thực tế & Phạm vi Wallpaper đã chốt:**
   - Cấm ghi hoặc giả định iOS Shortcuts có trigger "khi khóa / mở điện thoại". Chỉ hướng dẫn và thiết kế cho trigger có thật (*Time of Day*, *Focus Mode*, *App Opened/Closed*, *Charger*).
   - **Study Wallpaper Generator (Mục 4.3 `spec.md`):** Đã chốt hạ cấp cho Phase 1 — chỉ render ảnh PNG tóm tắt bài ôn để lưu vào Photos đặt thủ công (`NSPhotoLibraryAddUsageDescription`), **bỏ `GenerateStudyWallpaperIntent`** khỏi Phase 1.
-- **App Group linh hoạt khi sideload:** Mọi truy cập App Group ID và Bundle ID phải đi qua `Shared/Config/AppConstants.swift` để dễ thích nghi khi AltStore/SideStore/Sideloadly đổi prefix Bundle ID theo Apple ID cá nhân.
+- **App Group linh hoạt khi sideload:** Mọi truy cập App Group ID và Bundle ID phải đi qua `Shared/Config/AppConstants.swift` để lọc tất định chỉ các nhóm thuộc phạm vi `LockIn` (loại bỏ App Group không liên quan của app khác) và bảo đảm cả `LockInApp` + `LockInWidgetsExtension` mang chung một `com.apple.security.application-groups` entitlement trong chữ ký sau khi resign bởi AltStore/SideStore/Sideloadly.
 - **Giới hạn payload ActivityKit (< 4KB):** `StudySessionAttributes.ContentState` chỉ mang dữ liệu của **1 thẻ đang hiển thị** (rút gọn an toàn `questionText` và `answerText` tối đa 220 ký tự), danh sách thẻ đầy đủ lưu trong `SharedStoreContainer`.
 
 ### 5.2. Tiêu chuẩn Bảo mật Không thỏa hiệp (Chuẩn OWASP)
@@ -112,7 +112,7 @@
 2. **Băm chuẩn OWASP 600,000 vòng:** Dùng **`PBKDF2-HMAC-SHA256` tối thiểu `600,000` iterations** + `16-byte random salt` (`SecRandomCopyBytes`) + so sánh constant-time cho **tất cả 3 hạng mục**: (a) mật khẩu tài khoản cục bộ, (b) mã PIN 6 số dự phòng, và (c) dẫn xuất khóa AES-256 cho file backup.
 3. **Keychain đúng chuẩn & Ranh giới áp dụng `.biometryCurrentSet`:**
    - **CHỈ áp dụng `.biometryCurrentSet`** (`SecAccessControlCreateWithFlags` + `kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`) cho **khóa bảo vệ của App Lock** (`biometricUnlockSecret` — chỉ đọc khi mở khóa app ở foreground trong Main App).
-   - **CẤM áp dụng `.biometryCurrentSet` đại trà:** Không dùng cờ này cho `session token`, bản hash PIN 6 số dự phòng (dùng `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`), hay bất kỳ dữ liệu nào mà `LiveActivityIntent` / `AppIntent` / Widget chạy nền trên Lock Screen cần đọc (dùng `AppGroupSnapshotStore` / `SharedStoreContainer`, xóa sạch khi đăng xuất) — vì item gắn `.biometryCurrentSet` sẽ đòi Face ID hoặc thất bại khi đọc ở nền.
+   - **CẤM áp dụng `.biometryCurrentSet` đại trà:** Không dùng cờ này cho `session token`, bản hash PIN 6 số dự phòng (dùng `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`), hay bất kỳ dữ liệu nào mà `LiveActivityIntent` / `AppIntent` / Widget chạy nền ngoài app cần đọc (dùng `AppGroupSnapshotStore` / `SharedStoreContainer`, xóa sạch khi đăng xuất) — vì item gắn `.biometryCurrentSet` sẽ đòi Face ID ở lớp dữ liệu nền hoặc thất bại khi đọc ngoài foreground (Widget timeline / Intent chạy nền).
    - Nếu sinh trắc học bị thay đổi làm vô hiệu hóa item `.biometryCurrentSet`, cho phép người dùng mở khóa bằng **mật khẩu hoặc mã PIN 6 số** (kiểm tra qua bản hash PBKDF2 `600,000` vòng tách biệt trong Keychain, cooldown tăng dần sau 5 lần sai) rồi cấp lại item `.biometryCurrentSet` mới.
 4. **Cô lập dữ liệu đa user:** Mọi thao tác đọc/ghi trong `StorageModule` bắt buộc đi qua `UserDataIsolationGuard.swift` để lọc theo `activeUserId`.
 5. **Privacy Mode:** Hỗ trợ `.privacySensitive()` trên text câu hỏi/đáp án ở Live Activity & Widget khi người dùng bật Privacy Mode trong Settings (mặc định tắt để tiện ôn thi trực tiếp trên màn hình khóa).
@@ -169,7 +169,7 @@
 ### 7.1. Checklist Tự kiểm chứng trước khi bất kỳ Agent nào báo "Xong"
 1. **Kiểm tra ranh giới thư mục & xuyên Target:** `Frontend/` không chứa import bị cấm; `Backend/` không chứa UI tab/screen; `Shared/Intents/` và `LockInWidgetsExtension/` không phụ thuộc `Backend/`.
 2. **Kiểm tra Header & Single Responsibility:** Mỗi file đúng tên trong `spec.md`, có comment mô tả chính xác mục đích ở đầu file.
-3. **Kiểm tra Đồng bộ & Intent:** Mọi thay đổi dữ liệu đều cập nhật `SharedStoreContainer` + tăng `snapshotVersion` + phát `SyncEventBus` / `CrossProcessNotifier` (Darwin Notification) + làm mới `ActivityKit`/`WidgetKit`; 4 nút thẻ conform `LiveActivityIntent` (`openAppWhenRun = false`); `StartStudyActivityIntent` đặt `openAppWhenRun = true`.
+3. **Kiểm tra Đồng bộ & Intent:** Mọi thay đổi dữ liệu đều cập nhật `SharedStoreContainer` + tăng `snapshotVersion` + phát `SyncEventBus` / `CrossProcessNotifier` (Darwin Notification) + làm mới `ActivityKit`/`WidgetKit`; 4 nút thẻ conform `LiveActivityIntent` (`openAppWhenRun = false`), kiểm thử cả trước xác thực (yêu cầu xác thực thiết bị theo chính sách iOS) và sau xác thực (cập nhật ngay trên Lock Screen không nhảy vào app); `StartStudyActivityIntent` đặt `openAppWhenRun = true`.
 4. **Kiểm tra Bảo mật & Chất lượng code:** PBKDF2 đạt `600,000` vòng cho password/PIN/backup; sinh trắc học dùng Keychain `.biometryCurrentSet` **chỉ cho App Lock** (không gắn lên `session token` hay dữ liệu Intent nền); không để sót `TODO`, `FIXME`, `fatalError("not implemented")` hoặc bí mật hardcode.
 5. **Kiểm tra `project.yml` & Tests:** Toàn bộ `Shared/**` compile cho cả 2 targets (`LockInApp`, `LockInWidgetsExtension`); đủ **8 bộ test** trong `LockInTests/**` (bao gồm `LocalAuthServiceTests` và `StudyScheduleServiceTests`).
 
@@ -178,7 +178,7 @@
 - Gặp mâu thuẫn giữa `spec.md` và API thực tế của iOS 17 (`ActivityKit`, `WidgetKit`, `SwiftData`).
 - Một lỗi cấu hình/build CI hoặc lỗi kiểm thử thất bại quá **2 lần** liên tiếp mà không rõ nguyên nhân.
 - **Vượt quá 2 vòng phản hồi kiểm toán độc lập với GPT-6.2 Sol trong cùng một Wave:** Dừng tranh luận giữa hai mô hình, tổng hợp ngắn gọn bất đồng và các phương án để **chủ dự án tự quyết định**.
-- Phát hiện lỗ hổng bảo mật tiềm ẩn hoặc nguy cơ vượt giới hạn 3 App IDs của Free Apple ID.
+- Phát hiện lỗ hổng bảo mật tiềm ẩn hoặc nguy cơ vượt giới hạn Personal Team của Apple ID miễn phí (10 App IDs/7 ngày, 3 ứng dụng cài đặt trên thiết bị).
 
 ---
 

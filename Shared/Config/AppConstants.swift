@@ -29,45 +29,95 @@ public enum AppConstants {
         bundleIdentifier: String?,
         isContainerAvailable: (String) -> Bool
     ) -> String {
-        func sanitized(_ raw: String?) -> String? {
+        func sanitizedIdentifier(_ raw: String?) -> String? {
             guard let raw else { return nil }
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, !trimmed.contains("$(") else { return nil }
+            guard !trimmed.isEmpty, !trimmed.contains("$("), !trimmed.contains("*") else { return nil }
             return trimmed
+        }
+
+        func sanitizedAppGroup(_ raw: String?) -> String? {
+            guard let clean = sanitizedIdentifier(raw), clean.hasPrefix("group.") else { return nil }
+            return clean
+        }
+
+        let configuredInfoGroup = sanitizedAppGroup(infoPlistGroupId)
+        let baseBundleId = sanitizedIdentifier(bundleIdentifier).map { bundleId in
+            bundleId.hasSuffix(".widgets")
+                ? String(bundleId.dropLast(".widgets".count))
+                : bundleId
+        }
+        let bundleDerivedGroup = baseBundleId.map { "group.\($0)" }
+        let bundleDerivedSharedGroup = baseBundleId.map { "group.\($0).shared" }
+        let configuredSuffix = configuredInfoGroup.map { String($0.dropFirst("group.".count)) }
+        let defaultSuffix = String(defaultAppGroupIdentifier.dropFirst("group.".count))
+
+        func lockInMatchRank(for candidate: String) -> Int? {
+            if let configuredInfoGroup {
+                if candidate == configuredInfoGroup { return 0 }
+                if candidate.hasPrefix("\(configuredInfoGroup).") { return 1 }
+            }
+            if candidate == defaultAppGroupIdentifier { return 2 }
+            if candidate.hasPrefix("\(defaultAppGroupIdentifier).") { return 3 }
+            if let bundleDerivedSharedGroup, candidate == bundleDerivedSharedGroup { return 4 }
+            if let bundleDerivedGroup, candidate == bundleDerivedGroup { return 5 }
+            if let bundleDerivedGroup, candidate.hasPrefix("\(bundleDerivedGroup).") { return 6 }
+            if let configuredSuffix, candidate.hasSuffix(".\(configuredSuffix)") { return 7 }
+            if candidate.hasSuffix(".\(defaultSuffix)") { return 8 }
+            return nil
         }
 
         var orderedCandidates: [String] = []
         var seen: Set<String> = []
         func appendCandidate(_ candidate: String?) {
-            guard let clean = sanitized(candidate), !seen.contains(clean) else { return }
+            guard let clean = sanitizedAppGroup(candidate), !seen.contains(clean) else { return }
             seen.insert(clean)
             orderedCandidates.append(clean)
         }
 
-        for group in mobileProvisionGroups {
-            appendCandidate(group)
-        }
-        appendCandidate(infoPlistGroupId)
+        // Ưu tiên cấu hình tường minh (Xcode / TestFlight) nếu container khả dụng.
+        appendCandidate(configuredInfoGroup)
 
-        if let bundleId = sanitized(bundleIdentifier) {
-            let baseBundleId = bundleId.hasSuffix(".widgets")
-                ? String(bundleId.dropLast(".widgets".count))
-                : bundleId
-            appendCandidate("group.\(baseBundleId)")
-            appendCandidate("group.\(baseBundleId).shared")
+        // Lọc và sắp xếp tất định chỉ các App Group thuộc phạm vi LockIn trong mobileprovision,
+        // loại bỏ hoàn toàn App Group không liên quan và không phụ thuộc thứ tự trong profile.
+        var matchedProvisionByGroup: [String: Int] = [:]
+        for rawGroup in mobileProvisionGroups {
+            guard let clean = sanitizedAppGroup(rawGroup),
+                  let rank = lockInMatchRank(for: clean) else {
+                continue
+            }
+            if let existing = matchedProvisionByGroup[clean] {
+                matchedProvisionByGroup[clean] = min(existing, rank)
+            } else {
+                matchedProvisionByGroup[clean] = rank
+            }
+        }
+        let matchedProvisionCandidates = matchedProvisionByGroup
+            .sorted { lhs, rhs in
+                if lhs.value != rhs.value {
+                    return lhs.value < rhs.value
+                }
+                return lhs.key < rhs.key
+            }
+            .map(\.key)
+
+        for candidate in matchedProvisionCandidates {
+            appendCandidate(candidate)
         }
 
         appendCandidate(defaultAppGroupIdentifier)
+        appendCandidate(bundleDerivedSharedGroup)
+        appendCandidate(bundleDerivedGroup)
 
         for candidate in orderedCandidates where isContainerAvailable(candidate) {
             return candidate
         }
 
-        if let firstProvisioned = mobileProvisionGroups.compactMap(sanitized).first {
-            return firstProvisioned
+        if let configuredInfoGroup {
+            return configuredInfoGroup
         }
-        if let configuredInfo = sanitized(infoPlistGroupId) {
-            return configuredInfo
+        if let firstMatchedProvision = matchedProvisionCandidates.first {
+            return firstMatchedProvision
         }
         return defaultAppGroupIdentifier
     }
