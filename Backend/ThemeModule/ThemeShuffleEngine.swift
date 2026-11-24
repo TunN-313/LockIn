@@ -70,4 +70,14 @@ public final class ThemeShuffleEngine: ThemeModuleProtocol, @unchecked Sendable 
         let updated = try await catalogService.selectTheme(themeId: nextId)
         return ThemePalette.palette(for: updated.activeThemeId)
     }
+
+    public func rotateThemeForScheduledSession() async throws -> ThemePalette {
+        let pref = try await catalogService.fetchPreference()
+        let nextId = sharedRotationEngine.selectNextThemeId(
+            currentThemeId: pref.activeThemeId,
+            shufflePoolIds: pref.shufflePoolIds
+        )
+        let updated = try await catalogService.selectTheme(themeId: nextId)
+        return ThemePalette.palette(for: updated.activeThemeId)
+    }
 }

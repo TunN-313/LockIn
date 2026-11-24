@@ -195,6 +195,24 @@ public final class EncryptedBackupService: BackupModuleProtocol, @unchecked Send
         return try encoder.encode(envelope)
     }
 
+    /// Kiểm tra kích thước metadata và chỉ đọc tối đa 10 MB + 1 byte từ FileHandle trước khi nạp toàn bộ vào RAM.
+    public func readBoundedBackupFile(at url: URL) throws -> Data {
+        if let resourceValues = try? url.resourceValues(forKeys: [.fileSizeKey]),
+           let fileSize = resourceValues.fileSize,
+           fileSize > AppConstants.maxBackupFileBytes {
+            throw LockInDomainError.backupExceedsMaxSize
+        }
+
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+
+        let boundedData = try handle.read(upToCount: AppConstants.maxBackupFileBytes + 1) ?? Data()
+        guard boundedData.count <= AppConstants.maxBackupFileBytes else {
+            throw LockInDomainError.backupExceedsMaxSize
+        }
+        return boundedData
+    }
+
     public func importEncryptedBackup(_ data: Data, passphrase: String, mode: BackupRestoreMode) async throws {
         // Ghim phiên ban đầu trước khi giải mã để chặn thao tác đổi hồ sơ giữa chừng ghi nhầm sang user khác.
         let initialSession = try isolationGuard.requireActiveSession()

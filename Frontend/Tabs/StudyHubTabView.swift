@@ -45,6 +45,18 @@ public struct StudyHubTabView: View {
             }
             .background(Color(lockInHex: palette.backgroundHex).ignoresSafeArea())
             .navigationTitle("Học & Tác vụ")
+            .onAppear {
+                progressVM.startObserving()
+                decksVM.startObserving()
+                tasksVM.startObserving()
+                scheduleVM.startObserving()
+            }
+            .onDisappear {
+                progressVM.stopObserving()
+                decksVM.stopObserving()
+                tasksVM.stopObserving()
+                scheduleVM.stopObserving()
+            }
             .refreshable {
                 await progressVM.refresh()
                 await decksVM.refreshDecks()

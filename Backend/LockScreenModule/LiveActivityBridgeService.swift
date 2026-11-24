@@ -27,6 +27,8 @@ public final class LiveActivityBridgeService: LockScreenModuleProtocol, @uncheck
     private let snapshotStore: AppGroupSnapshotStoreProtocol
     private let permissionChecker: DevicePermissionCheckerProtocol
     private let wallpaperRenderer: StudyWallpaperRenderServiceProtocol
+    private let schedulerModule: SchedulerModuleProtocol
+    private let photoLibrarySaver: PhotoLibrarySaverProtocol
     private let syncEventBus: SyncEventBus
 
     public init(
@@ -35,6 +37,8 @@ public final class LiveActivityBridgeService: LockScreenModuleProtocol, @uncheck
         snapshotStore: AppGroupSnapshotStoreProtocol,
         permissionChecker: DevicePermissionCheckerProtocol,
         wallpaperRenderer: StudyWallpaperRenderServiceProtocol,
+        schedulerModule: SchedulerModuleProtocol,
+        photoLibrarySaver: PhotoLibrarySaverProtocol = PhotoLibrarySaver(),
         syncEventBus: SyncEventBus
     ) {
         self.studyStore = studyStore
@@ -42,7 +46,20 @@ public final class LiveActivityBridgeService: LockScreenModuleProtocol, @uncheck
         self.snapshotStore = snapshotStore
         self.permissionChecker = permissionChecker
         self.wallpaperRenderer = wallpaperRenderer
+        self.schedulerModule = schedulerModule
+        self.photoLibrarySaver = photoLibrarySaver
         self.syncEventBus = syncEventBus
+    }
+
+    public func requestNotificationPermissionForWizard() async throws -> Bool {
+        try await schedulerModule.requestNotificationPermission()
+    }
+
+    public func saveWallpaperPNGToPhotos(_ pngData: Data) async throws {
+        guard !pngData.isEmpty else {
+            throw LockInDomainError.validationFailed("Chưa có dữ liệu ảnh PNG hợp lệ để lưu vào Thư viện ảnh.")
+        }
+        try await photoLibrarySaver.savePNGDataToPhotos(pngData)
     }
 
     public func checkBridgeStatus() async -> LockScreenBridgeStatus {

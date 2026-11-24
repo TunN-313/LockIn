@@ -6,16 +6,11 @@ import SwiftUI
 public struct LockScreenWizardView: View {
     @Environment(\.lockInPalette) private var palette
     @Bindable var viewModel: LockScreenWizardViewModel
-    private let onRequestNotificationPermission: () async -> Void
 
     @State private var isShowingShortcutsGuide = false
 
-    public init(
-        viewModel: LockScreenWizardViewModel,
-        onRequestNotificationPermission: @escaping () async -> Void
-    ) {
+    public init(viewModel: LockScreenWizardViewModel) {
         self.viewModel = viewModel
-        self.onRequestNotificationPermission = onRequestNotificationPermission
     }
 
     public var body: some View {
@@ -91,8 +86,7 @@ public struct LockScreenWizardView: View {
             if !viewModel.status.isNotificationAuthorized {
                 Button {
                     Task {
-                        await onRequestNotificationPermission()
-                        await viewModel.refreshAll()
+                        await viewModel.requestNotificationPermission()
                     }
                 } label: {
                     Label("Xin quyền Thông báo", systemImage: "bell.badge")
@@ -185,11 +179,7 @@ public struct LockScreenWizardView: View {
         }
         .minimalCardStyle()
         .task {
-            viewModel.startObserving()
             await viewModel.refreshAll()
-        }
-        .onDisappear {
-            viewModel.stopObserving()
         }
         .sheet(isPresented: $isShowingShortcutsGuide) {
             ShortcutsGuideSheetView()

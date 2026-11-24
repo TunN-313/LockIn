@@ -12,6 +12,8 @@ public struct RootGateView: View {
     @State private var isBootstrapping: Bool = true
     @State private var didEnterBackground: Bool = false
     @State private var isAppLockRequiredCached: Bool = false
+    @State private var isVerifyingForegroundLock: Bool = false
+    @State private var isPrivacyCoverVisible: Bool = false
     @State private var activePalette: ThemePalette = .minimalPaper
 
     public init(container: DependencyContainer) {
@@ -32,8 +34,11 @@ public struct RootGateView: View {
                         activeUser = profile
                         isAppUnlocked = true
                         didEnterBackground = false
+                        isVerifyingForegroundLock = false
+                        isPrivacyCoverVisible = false
                         Task {
                             isAppLockRequiredCached = await container.security.isAppLockRequired()
+                            await handleForegroundStudyTriggers()
                             await reloadActivePalette()
                         }
                     }
@@ -44,17 +49,27 @@ public struct RootGateView: View {
                     onUnlocked: {
                         isAppUnlocked = true
                         didEnterBackground = false
+                        isVerifyingForegroundLock = false
+                        isPrivacyCoverVisible = false
                         Task {
                             isAppLockRequiredCached = await container.security.isAppLockRequired()
-                            _ = try? await container.theme.rotateThemeIfNeeded(triggerOnAppOpen: true)
+                            await handleForegroundStudyTriggers()
                             await reloadActivePalette()
                         }
                     }
                 )
                 .id(activeUser?.id)
             } else {
-                MainTabContainerView(container: container)
-                    .id(activeUser?.id)
+                ZStack {
+                    MainTabContainerView(container: container)
+                        .id(activeUser?.id)
+
+                    if isPrivacyCoverVisible || isVerifyingForegroundLock {
+                        privacyLockCoverView
+                            .transition(.opacity)
+                            .zIndex(10)
+                    }
+                }
             }
         }
         .lockInTheme(activePalette)
@@ -64,31 +79,68 @@ public struct RootGateView: View {
         }
         .onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
+            case .inactive:
+                if activeUser != nil && isAppUnlocked && isAppLockRequiredCached {
+                    isPrivacyCoverVisible = true
+                }
             case .active:
                 container.syncEventBus.refreshAll()
+                let returningFromBackground = didEnterBackground
+                if returningFromBackground && activeUser != nil {
+                    isVerifyingForegroundLock = true
+                    isPrivacyCoverVisible = true
+                }
                 Task {
+                    defer {
+                        isVerifyingForegroundLock = false
+                        isPrivacyCoverVisible = false
+                    }
                     let lockRequired = await container.security.isAppLockRequired()
                     isAppLockRequiredCached = lockRequired
-                    if didEnterBackground {
+                    if returningFromBackground {
                         didEnterBackground = false
                         if activeUser != nil && lockRequired {
                             isAppUnlocked = false
                         } else if activeUser != nil && isAppUnlocked {
-                            _ = try? await container.theme.rotateThemeIfNeeded(triggerOnAppOpen: true)
+                            await handleForegroundStudyTriggers()
                         }
                     } else if activeUser != nil && isAppUnlocked {
-                        _ = try? await container.theme.rotateThemeIfNeeded(triggerOnAppOpen: true)
+                        await handleForegroundStudyTriggers()
                     }
                     await reloadActivePalette()
                 }
             case .background:
                 didEnterBackground = true
-                if activeUser != nil && isAppLockRequiredCached {
-                    isAppUnlocked = false
+                if activeUser != nil {
+                    isPrivacyCoverVisible = true
+                    if isAppLockRequiredCached {
+                        isAppUnlocked = false
+                    }
                 }
-            default:
+            @unknown default:
                 break
             }
+        }
+    }
+
+    private var privacyLockCoverView: some View {
+        ZStack {
+            Color(lockInHex: activePalette.backgroundHex)
+                .ignoresSafeArea()
+            VStack(spacing: 12) {
+                Image(systemName: "lock.shield.fill")
+                    .font(.system(size: 44))
+                    .foregroundStyle(Color(lockInHex: activePalette.accentHex))
+                Text("LockIn đang bảo vệ phiên học")
+                    .font(.headline)
+            }
+        }
+    }
+
+    private func handleForegroundStudyTriggers() async {
+        let dueResult = try? await container.scheduler.applyDueScheduleIfNeeded(at: Date())
+        if dueResult?.didRotateTheme != true {
+            _ = try? await container.theme.rotateThemeIfNeeded(triggerOnAppOpen: true)
         }
     }
 
@@ -101,7 +153,7 @@ public struct RootGateView: View {
             isAppLockRequiredCached = lockRequired
             isAppUnlocked = !lockRequired
             if isAppUnlocked {
-                _ = try? await container.theme.rotateThemeIfNeeded(triggerOnAppOpen: true)
+                await handleForegroundStudyTriggers()
             }
             await reloadActivePalette()
         } else {
@@ -131,14 +183,20 @@ public struct RootGateView: View {
                     isAppUnlocked = false
                     isAppLockRequiredCached = false
                     didEnterBackground = false
+                    isVerifyingForegroundLock = false
+                    isPrivacyCoverVisible = false
                     activePalette = .minimalPaper
                 } else {
                     activeUser = await container.auth.currentActiveUser()
                     isAppUnlocked = true
                     didEnterBackground = false
+                    isVerifyingForegroundLock = false
+                    isPrivacyCoverVisible = false
                     isAppLockRequiredCached = await container.security.isAppLockRequired()
                     await reloadActivePalette()
                 }
+            case .appLockPolicyChanged(let isRequired):
+                isAppLockRequiredCached = isRequired
             case .themeRotated(let themeId):
                 activePalette = ThemePalette.palette(for: themeId)
             case .externalStateRefreshed:

@@ -36,7 +36,7 @@ public final class SchedulePlannerViewModel {
                 switch event {
                 case .cardsChanged, .externalStateRefreshed, .userSessionChanged:
                     await self.refresh()
-                case .tasksChanged, .progressUpdated, .themeRotated:
+                case .tasksChanged, .progressUpdated, .themeRotated, .appLockPolicyChanged:
                     break
                 }
             }
@@ -109,6 +109,21 @@ public final class SchedulePlannerViewModel {
             statusMessage = granted
                 ? "Đã bật quyền thông báo nhắc giờ ôn thi."
                 : "Quyền thông báo bị từ chối trong Cài đặt iOS."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func activateScheduledSession(_ scheduleId: UUID) async {
+        errorMessage = nil
+        do {
+            let result = try await schedulerModule.activateScheduledSession(scheduleId: scheduleId)
+            if result.didRotateTheme {
+                let themeName = ThemePalette.palette(for: result.activeThemeId).displayName
+                statusMessage = "Đã ưu tiên bộ đề \(result.prioritizedDeckTitle) & đổi theme sang \(themeName)."
+            } else {
+                statusMessage = "Đã ưu tiên bộ đề \(result.prioritizedDeckTitle) lên màn hình khóa."
+            }
         } catch {
             errorMessage = error.localizedDescription
         }

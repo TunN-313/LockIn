@@ -13,7 +13,11 @@ public final class PendingReminderViewModel {
     public var summary: PendingReminderSummary?
     public var nextScheduleTitle: String?
     public var nextScheduleDate: Date?
+    public var reminderFrequency: ReminderNotificationFrequency = .off
     public var isPresentingPopup: Bool = false
+    public var isSchedulingSnooze: Bool = false
+    public var statusMessage: String?
+    public var errorMessage: String?
 
     public init(studyModule: StudyModuleProtocol, schedulerModule: SchedulerModuleProtocol) {
         self.studyModule = studyModule
@@ -25,6 +29,8 @@ public final class PendingReminderViewModel {
             isPresentingPopup = false
             return
         }
+        statusMessage = nil
+        errorMessage = nil
         do {
             async let fetchedSummary = studyModule.fetchPendingReminderSummary()
             async let fetchedSchedules = schedulerModule.fetchSchedules()
@@ -50,6 +56,47 @@ public final class PendingReminderViewModel {
             }
         } catch {
             isPresentingPopup = false
+        }
+    }
+
+    public func loadReminderFrequency() async {
+        do {
+            reminderFrequency = try await schedulerModule.fetchReminderFrequency()
+        } catch {
+            // Giữ cấu hình mặc định nếu chưa có hồ sơ hoạt động.
+        }
+    }
+
+    public func updateReminderFrequency(_ frequency: ReminderNotificationFrequency) async {
+        errorMessage = nil
+        statusMessage = nil
+        do {
+            let updated = try await schedulerModule.updateReminderFrequency(frequency)
+            reminderFrequency = updated
+            statusMessage = updated == .off
+                ? "Đã tắt thông báo nhắc việc định kỳ."
+                : "Đã lên lịch nhắc: \(updated.displayName)."
+        } catch {
+            errorMessage = error.localizedDescription
+            await loadReminderFrequency()
+        }
+    }
+
+    public func snoozeReminder(afterMinutes: Int = 30) async -> Bool {
+        errorMessage = nil
+        statusMessage = nil
+        isSchedulingSnooze = true
+        defer { isSchedulingSnooze = false }
+        do {
+            let triggerDate = try await schedulerModule.scheduleSnoozeReminder(
+                afterMinutes: afterMinutes,
+                suggestedDeckTitle: summary?.suggestedDeckTitle
+            )
+            statusMessage = "Đã hẹn nhắc lại lúc \(triggerDate.formatted(date: .omitted, time: .shortened)) (sau \(afterMinutes) phút)."
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
         }
     }
 }

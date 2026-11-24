@@ -1,9 +1,8 @@
-// LockScreenWizardViewModel.swift — Đọc trạng thái Bridge, chỉnh tùy chọn hiển thị Lock Screen và lưu ảnh Wallpaper vào Photos.
-// Thuộc Frontend/Features/LockScreenWizard; chỉ gọi LockScreenModuleProtocol, ThemeModuleProtocol, SyncEventBus và Photos khi lưu ảnh.
+// LockScreenWizardViewModel.swift — Đọc trạng thái Bridge, chỉnh hiển thị Lock Screen và lưu Wallpaper qua LockScreenModule.
+// Thuộc Frontend/Features/LockScreenWizard; chỉ gọi LockScreenModuleProtocol, ThemeModuleProtocol và SyncEventBus.
 
 import Foundation
 import Observation
-import Photos
 import UIKit
 
 @MainActor
@@ -52,7 +51,7 @@ public final class LockScreenWizardViewModel {
                 switch event {
                 case .cardsChanged, .themeRotated, .externalStateRefreshed, .userSessionChanged:
                     await self.refreshAll()
-                case .tasksChanged, .progressUpdated:
+                case .tasksChanged, .progressUpdated, .appLockPolicyChanged:
                     break
                 }
             }
@@ -118,6 +117,19 @@ public final class LockScreenWizardViewModel {
         statusMessage = "Đã dừng Live Activity trên Lock Screen."
     }
 
+    public func requestNotificationPermission() async {
+        errorMessage = nil
+        do {
+            let granted = try await lockScreenModule.requestNotificationPermissionForWizard()
+            status = await lockScreenModule.checkBridgeStatus()
+            statusMessage = granted
+                ? "Đã bật quyền Thông báo nhắc học."
+                : "Quyền Thông báo chưa được cấp trong Cài đặt iOS."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     public func generateWallpaper(maxLines: Int = 5) async {
         errorMessage = nil
         do {
@@ -140,17 +152,8 @@ public final class LockScreenWizardViewModel {
         }
         guard let pngData = wallpaperPayload?.pngData else { return }
 
-        let authStatus = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-        guard authStatus == .authorized || authStatus == .limited else {
-            errorMessage = "Ứng dụng chưa được cấp quyền Thêm vào Ảnh (Photos) trong Cài đặt."
-            return
-        }
-
         do {
-            try await PHPhotoLibrary.shared().performChanges {
-                let request = PHAssetCreationRequest.forAsset()
-                request.addResource(with: .photo, data: pngData, options: nil)
-            }
+            try await lockScreenModule.saveWallpaperPNGToPhotos(pngData)
             statusMessage = "Đã lưu ảnh tóm tắt vào Thư viện ảnh. Bạn có thể đặt làm hình nền thủ công."
         } catch {
             errorMessage = error.localizedDescription

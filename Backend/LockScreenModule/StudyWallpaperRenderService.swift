@@ -2,8 +2,29 @@
 // Ngoại lệ duy nhất trong Backend/ dùng SwiftUI ImageRenderer (không chứa màn hình điều hướng hay UI tương tác).
 
 import Foundation
+import Photos
 import SwiftUI
 import UIKit
+
+public protocol PhotoLibrarySaverProtocol: Sendable {
+    func savePNGDataToPhotos(_ pngData: Data) async throws
+}
+
+public final class PhotoLibrarySaver: PhotoLibrarySaverProtocol {
+    public init() {}
+
+    public func savePNGDataToPhotos(_ pngData: Data) async throws {
+        let authStatus = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        guard authStatus == .authorized || authStatus == .limited else {
+            throw LockInDomainError.validationFailed("Ứng dụng chưa được cấp quyền Thêm vào Ảnh (Photos) trong Cài đặt.")
+        }
+
+        try await PHPhotoLibrary.shared().performChanges {
+            let request = PHAssetCreationRequest.forAsset()
+            request.addResource(with: .photo, data: pngData, options: nil)
+        }
+    }
+}
 
 public protocol StudyWallpaperRenderServiceProtocol: Sendable {
     @MainActor func renderSummaryPNG(

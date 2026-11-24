@@ -288,4 +288,44 @@ final class LocalAuthServiceTests: XCTestCase {
         let stillProtectedByPin = await env.container.security.isAppLockRequired()
         XCTAssertTrue(stillProtectedByPin)
     }
+
+    @MainActor
+    func testAppLockPolicyChangedEventPublishedWithoutAdvancingSnapshotMarker() async throws {
+        let env = try LockInTestEnvironment()
+        defer { env.cleanup() }
+        let userCredential = "PolicyOwner#2026"
+
+        _ = try await env.container.auth.register(
+            username: "policy_sync_a",
+            displayName: "Policy A",
+            password: userCredential
+        )
+        let markerBefore = env.container.syncEventBus.lastObservedMarker
+
+        let stream = env.container.syncEventBus.subscribe()
+        let collector = Task { @MainActor in
+            var policyEvents: [Bool] = []
+            for await event in stream {
+                if case .appLockPolicyChanged(let isRequired) = event {
+                    policyEvents.append(isRequired)
+                    if policyEvents.count >= 2 { break }
+                }
+            }
+            return policyEvents
+        }
+
+        try await env.container.security.setFallbackPin("135790")
+        XCTAssertEqual(env.container.syncEventBus.lastObservedMarker, markerBefore)
+
+        try await env.container.auth.logout()
+        _ = try await env.container.auth.register(
+            username: "policy_sync_b",
+            displayName: "Policy B",
+            password: userCredential
+        )
+        try await env.container.security.disableBiometricLock()
+
+        let emittedPolicies = await collector.value
+        XCTAssertEqual(emittedPolicies, [true, false])
+    }
 }

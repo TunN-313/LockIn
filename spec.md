@@ -233,7 +233,7 @@ LockIn/
    - Hiển thị bản xem trước (preview) số thẻ hợp lệ và cảnh báo dòng sai định dạng trước khi lưu hàng loạt.
 4. **Danh sách Tác vụ & Lịch Real-time (`TaskItem` & `Real-time Scheduler`):**
    - Tạo task ôn tập cần làm (tiêu đề, hạn chót `dueDate`, mức độ ưu tiên `low`/`medium`/`high`, gắn tùy chọn với một bộ đề).
-   - **Lên lịch Real-time (`StudySchedule`):** Cho phép chọn khung giờ ôn trong ngày và các ngày lặp lại trong tuần (T2–CN). Hệ thống đồng bộ với đồng hồ thực của thiết bị, lên lịch Local Notification nhắc đúng giờ và đánh dấu bộ đề ưu tiên khi đến khung giờ học.
+   - **Lên lịch Real-time (`StudySchedule`):** Cho phép chọn khung giờ ôn trong ngày và các ngày lặp lại trong tuần (T2–CN). Hệ thống đồng bộ với đồng hồ thực của thiết bị, lên lịch Local Notification nhắc đúng giờ và đánh dấu bộ đề ưu tiên khi đến khung giờ học. Do giới hạn iOS không có APNs push nền trong phạm vi \$0, Local Notification phát đúng giờ đã hẹn; còn thao tác ưu tiên bộ đề lên snapshot Lock Screen và xoay theme theo `autoRotateTheme` được thực thi khi người dùng mở LockIn trong khung giờ lịch (tối đa 2 giờ sau giờ hẹn), nhấn Bắt đầu phiên lịch ở Tab 1, hoặc chạy iOS Shortcuts *Theo giờ trong ngày (Time of Day)*.
 5. **Điểm mở rộng kiến trúc (Extension Points):**
    - Thiết kế sẵn các protocol trừu tượng (`SchedulingEngineProtocol`, `StudyTimerProtocol`, `CardImporterProtocol`) để sau MVP có thể gắn thêm Spaced Repetition (SM-2), đồng hồ Pomodoro hoặc OCR/PDF mà không phá vỡ cấu trúc tab hiện tại.
 

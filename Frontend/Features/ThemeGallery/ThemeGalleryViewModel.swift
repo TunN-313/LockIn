@@ -47,7 +47,7 @@ public final class ThemeGalleryViewModel {
                 switch event {
                 case .themeRotated, .externalStateRefreshed, .userSessionChanged:
                     await self.refresh()
-                case .cardsChanged, .tasksChanged, .progressUpdated:
+                case .cardsChanged, .tasksChanged, .progressUpdated, .appLockPolicyChanged:
                     break
                 }
             }

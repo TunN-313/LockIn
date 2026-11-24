@@ -194,4 +194,170 @@ final class StudyScheduleServiceTests: XCTestCase {
         )
         XCTAssertNil(env.container.scheduler.nextScheduledDate(for: disabledSchedule, after: reference10AM))
     }
+
+    @MainActor
+    func testReminderFrequencyAndSnoozeNotifications() async throws {
+        let env = try LockInTestEnvironment()
+        defer { env.cleanup() }
+        let userCredential = "FreqOwner#2026"
+
+        _ = try await env.container.auth.register(
+            username: "freq_tester",
+            displayName: "Freq Tester",
+            password: userCredential
+        )
+        let deck = try await env.container.study.createDeck(
+            title: "Periodic Study",
+            subjectTag: "CS",
+            accentHex: "#2563EB",
+            examDate: nil,
+            dailyGoal: 10
+        )
+
+        env.notificationService.authorized = false
+        do {
+            _ = try await env.container.scheduler.updateReminderFrequency(.daily)
+            XCTFail("Không có quyền thông báo phải bị từ chối.")
+        } catch let error as LockInDomainError {
+            guard case .validationFailed = error else {
+                return XCTFail("Kỳ vọng validationFailed, nhận: \(error)")
+            }
+        }
+
+        do {
+            _ = try await env.container.scheduler.scheduleSnoozeReminder(afterMinutes: 30, suggestedDeckTitle: deck.title)
+            XCTFail("Hẹn nhắc lại khi chưa có quyền thông báo phải bị từ chối.")
+        } catch let error as LockInDomainError {
+            guard case .validationFailed = error else {
+                return XCTFail("Kỳ vọng validationFailed, nhận: \(error)")
+            }
+        }
+
+        env.notificationService.authorized = true
+        let updated = try await env.container.scheduler.updateReminderFrequency(.twiceDaily)
+        XCTAssertEqual(updated, .twiceDaily)
+        let fetched = try await env.container.scheduler.fetchReminderFrequency()
+        XCTAssertEqual(fetched, .twiceDaily)
+        XCTAssertEqual(env.notificationService.pendingIdentifiers.count, 2)
+
+        let cleared = try await env.container.scheduler.updateReminderFrequency(.off)
+        XCTAssertEqual(cleared, .off)
+        XCTAssertTrue(env.notificationService.pendingIdentifiers.isEmpty)
+
+        let snoozeDate = try await env.container.scheduler.scheduleSnoozeReminder(
+            afterMinutes: 30,
+            suggestedDeckTitle: deck.title
+        )
+        XCTAssertGreaterThan(snoozeDate, Date())
+        XCTAssertEqual(env.notificationService.snoozeIdentifiers.count, 1)
+
+        do {
+            _ = try await env.container.scheduler.scheduleSnoozeReminder(afterMinutes: 2, suggestedDeckTitle: deck.title)
+            XCTFail("Thời gian snooze dưới 5 phút phải bị từ chối.")
+        } catch let error as LockInDomainError {
+            guard case .validationFailed = error else {
+                return XCTFail("Kỳ vọng validationFailed, nhận: \(error)")
+            }
+        }
+    }
+
+    @MainActor
+    func testDueScheduleActivationAutoRotateThemeOncePerDayAndReminderSuggestion() async throws {
+        let env = try LockInTestEnvironment()
+        defer { env.cleanup() }
+        let userCredential = "AutoRotateOwner#2026"
+
+        _ = try await env.container.auth.register(
+            username: "auto_rotate_sched",
+            displayName: "Auto Rotate",
+            password: userCredential
+        )
+        _ = try await env.container.theme.updateShuffleConfiguration(
+            isEnabled: false,
+            poolIds: [ThemePalette.minimalPaper.id, ThemePalette.midnightInk.id],
+            rotateOnAppOpen: false,
+            rotateOnShortcutTrigger: true
+        )
+
+        let deckA = try await env.container.study.createDeck(
+            title: "General Deck",
+            subjectTag: "Misc",
+            accentHex: "#2563EB",
+            examDate: Date().addingTimeInterval(86_400),
+            dailyGoal: 10
+        )
+        let deckB = try await env.container.study.createDeck(
+            title: "Scheduled Priority Deck",
+            subjectTag: "OS",
+            accentHex: "#16A34A",
+            examDate: nil,
+            dailyGoal: 10
+        )
+        _ = try await env.container.study.upsertCard(
+            cardId: nil,
+            deckId: deckB.id,
+            question: "What is Mutex?",
+            answer: "Mutual exclusion primitive",
+            hintOrNote: "",
+            status: .new
+        )
+
+        let now = Date()
+        let cal = Calendar.current
+        let comps = cal.dateComponents([.hour, .minute, .weekday], from: now)
+        let todayBit = 1 << ((comps.weekday ?? 1) - 1)
+        let hour = comps.hour ?? 10
+        let minute = comps.minute ?? 0
+        guard let scheduleTimestamp = cal.date(bySettingHour: hour, minute: minute, second: 0, of: cal.startOfDay(for: now)) else {
+            return XCTFail("Không tạo được mốc thời gian lịch.")
+        }
+        let checkDate = scheduleTimestamp.addingTimeInterval(5)
+
+        let dueSchedule = try await env.container.scheduler.saveSchedule(
+            scheduleId: nil,
+            deckId: deckB.id,
+            title: "Phiên ôn ưu tiên",
+            hour: hour,
+            minute: minute,
+            weekdaysMask: todayBit,
+            isEnabled: true,
+            autoRotateTheme: true
+        )
+
+        let summary = try await env.container.study.fetchPendingReminderSummary()
+        XCTAssertEqual(summary.suggestedDeckId, deckB.id)
+        XCTAssertEqual(summary.suggestedDeckTitle, "Scheduled Priority Deck")
+
+        let applied = try await env.container.scheduler.applyDueScheduleIfNeeded(at: checkDate)
+        let result = try XCTUnwrap(applied)
+        XCTAssertEqual(result.schedule.id, dueSchedule.id)
+        XCTAssertEqual(result.prioritizedDeckId, deckB.id)
+        XCTAssertTrue(result.didRotateTheme)
+        XCTAssertEqual(result.activeThemeId, ThemePalette.midnightInk.id)
+
+        let snapshot = try env.snapshotStore.loadSnapshot()
+        XCTAssertEqual(snapshot.activeDeckId, deckB.id)
+        XCTAssertEqual(snapshot.activeThemeId, ThemePalette.midnightInk.id)
+
+        // Gọi lại lần hai trong cùng ngày không được xoay theme hoặc áp dụng lặp lại.
+        let secondApply = try await env.container.scheduler.applyDueScheduleIfNeeded(at: checkDate.addingTimeInterval(60))
+        XCTAssertNil(secondApply)
+
+        // Kích hoạt thủ công một lịch có autoRotateTheme = false -> ưu tiên bộ đề nhưng giữ nguyên theme.
+        let manualSchedule = try await env.container.scheduler.saveSchedule(
+            scheduleId: nil,
+            deckId: deckA.id,
+            title: "Ôn thủ công không đổi theme",
+            hour: hour,
+            minute: minute,
+            weekdaysMask: todayBit,
+            isEnabled: false,
+            autoRotateTheme: false
+        )
+        let manualResult = try await env.container.scheduler.activateScheduledSession(scheduleId: manualSchedule.id)
+        XCTAssertEqual(manualResult.prioritizedDeckId, deckA.id)
+        XCTAssertFalse(manualResult.didRotateTheme)
+        XCTAssertEqual(manualResult.activeThemeId, ThemePalette.midnightInk.id)
+        XCTAssertEqual(try env.snapshotStore.loadSnapshot().activeDeckId, deckA.id)
+    }
 }

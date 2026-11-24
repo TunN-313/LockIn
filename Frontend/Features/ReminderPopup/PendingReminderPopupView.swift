@@ -94,11 +94,26 @@ public struct PendingReminderPopupView: View {
                         }
                         .buttonStyle(.bordered)
 
-                        Button("Nhắc lại sau") {
-                            dismiss()
+                        Button {
+                            Task { _ = await viewModel.snoozeReminder(afterMinutes: 30) }
+                        } label: {
+                            Label("Nhắc lại sau (30 phút)", systemImage: "clock.badge.checkmark")
+                                .frame(maxWidth: .infinity)
                         }
-                        .font(.subheadline)
-                        .foregroundStyle(Color(lockInHex: palette.textSecondaryHex))
+                        .buttonStyle(.bordered)
+                        .disabled(viewModel.isSchedulingSnooze)
+                    }
+
+                    if let statusMessage = viewModel.statusMessage {
+                        Label(statusMessage, systemImage: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(Color(lockInHex: palette.accentHex))
+                    }
+
+                    if let errorMessage = viewModel.errorMessage {
+                        Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.red)
                     }
                 }
 
@@ -108,6 +123,11 @@ public struct PendingReminderPopupView: View {
             .background(Color(lockInHex: palette.backgroundHex).ignoresSafeArea())
             .navigationTitle("Nhắc nhở ôn thi")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Đóng") { dismiss() }
+                }
+            }
         }
     }
 

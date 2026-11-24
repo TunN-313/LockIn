@@ -86,6 +86,7 @@ public final class InMemoryLocalNotificationService: LocalNotificationServicePro
     public var authorized = true
     public var pendingIdentifiers: [String] = []
     public var deliveredIdentifiers: [String] = []
+    public var snoozeIdentifiers: [String] = []
     public var cancelAllCallCount = 0
 
     public init() {}
@@ -106,14 +107,16 @@ public final class InMemoryLocalNotificationService: LocalNotificationServicePro
         lock.lock()
         defer { lock.unlock() }
         cancelAllCallCount += 1
-        pendingIdentifiers.removeAll { $0.hasPrefix(LocalNotificationService.lockInNotificationPrefix) }
-        deliveredIdentifiers.removeAll { $0.hasPrefix(LocalNotificationService.lockInNotificationPrefix) }
+        pendingIdentifiers.removeAll { $0.hasPrefix(LocalNotificationService.lockInAllPrefix) }
+        deliveredIdentifiers.removeAll { $0.hasPrefix(LocalNotificationService.lockInAllPrefix) }
+        snoozeIdentifiers.removeAll { $0.hasPrefix(LocalNotificationService.lockInAllPrefix) }
     }
 
     public func resyncNotifications(
         forUserId userId: UUID,
         schedules: [StudyScheduleDTO],
-        deckTitlesById: [UUID: String]
+        deckTitlesById: [UUID: String],
+        reminderFrequency: ReminderNotificationFrequency
     ) async throws {
         await cancelAllLockInNotifications()
         lock.lock()
@@ -125,12 +128,49 @@ public final class InMemoryLocalNotificationService: LocalNotificationServicePro
                 pendingIdentifiers.append("\(userPrefix)\(schedule.id.uuidString).\(weekday)")
             }
         }
+        if reminderFrequency != .off {
+            for hour in reminderFrequency.scheduledHours {
+                pendingIdentifiers.append("\(LocalNotificationService.periodicReminderPrefix)\(userId.uuidString).\(hour)")
+            }
+        }
+    }
+
+    public func scheduleOneTimeSnooze(
+        forUserId userId: UUID,
+        afterMinutes: Int,
+        title: String,
+        body: String
+    ) async throws -> Date {
+        lock.lock()
+        defer { lock.unlock() }
+        let identifier = "\(LocalNotificationService.snoozeReminderPrefix)\(userId.uuidString)"
+        snoozeIdentifiers.removeAll { $0 == identifier }
+        snoozeIdentifiers.append(identifier)
+        let interval = TimeInterval(max(60, afterMinutes * 60))
+        return Date().addingTimeInterval(interval)
     }
 
     public func seedDeliveredNotification(identifier: String) {
         lock.lock()
         defer { lock.unlock() }
         deliveredIdentifiers.append(identifier)
+    }
+}
+
+public final class InMemoryPhotoLibrarySaver: PhotoLibrarySaverProtocol, @unchecked Sendable {
+    private let lock = NSLock()
+    public var allowSave = true
+    public var savedPayloads: [Data] = []
+
+    public init() {}
+
+    public func savePNGDataToPhotos(_ pngData: Data) async throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard allowSave else {
+            throw LockInDomainError.validationFailed("Ứng dụng chưa được cấp quyền Thêm vào Ảnh (Photos) trong Cài đặt.")
+        }
+        savedPayloads.append(pngData)
     }
 }
 
@@ -141,6 +181,7 @@ public final class LockInTestEnvironment {
     public let snapshotStore: AppGroupSnapshotStore
     public let keychain: InMemoryKeychainStorage
     public let notificationService: InMemoryLocalNotificationService
+    public let photoLibrarySaver: InMemoryPhotoLibrarySaver
     public let container: DependencyContainer
 
     public init() throws {
@@ -153,12 +194,15 @@ public final class LockInTestEnvironment {
         self.snapshotStore = try AppGroupSnapshotStore.makeForTesting(directoryURL: tempDir)
         self.keychain = InMemoryKeychainStorage()
         self.notificationService = InMemoryLocalNotificationService()
+        self.photoLibrarySaver = InMemoryPhotoLibrarySaver()
         self.container = DependencyContainer.makeForTesting(
             modelContainer: modelContainer,
             snapshotStore: snapshotStore,
             keychain: keychain,
             notificationService: notificationService,
-            enableDarwinObserver: false
+            enableDarwinObserver: false,
+            settingsDirectoryURL: tempDir,
+            photoLibrarySaver: photoLibrarySaver
         )
     }
 

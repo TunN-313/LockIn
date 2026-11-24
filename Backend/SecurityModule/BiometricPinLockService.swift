@@ -22,6 +22,7 @@ public actor BiometricPinLockService: SecurityModuleProtocol {
     private let isolationGuard: UserDataIsolationGuardProtocol
     private let keychain: KeychainStorageProtocol
     private let crypto: PasswordCryptoServiceProtocol
+    private let syncEventBus: SyncEventBus?
     private let nowProvider: @Sendable () -> Date
 
     private let encoder = JSONEncoder()
@@ -32,12 +33,14 @@ public actor BiometricPinLockService: SecurityModuleProtocol {
         isolationGuard: UserDataIsolationGuardProtocol,
         keychain: KeychainStorageProtocol,
         crypto: PasswordCryptoServiceProtocol,
+        syncEventBus: SyncEventBus? = nil,
         nowProvider: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.studyStore = studyStore
         self.isolationGuard = isolationGuard
         self.keychain = keychain
         self.crypto = crypto
+        self.syncEventBus = syncEventBus
         self.nowProvider = nowProvider
     }
 
@@ -63,6 +66,7 @@ public actor BiometricPinLockService: SecurityModuleProtocol {
         try keychain.saveStandardData(hash, account: KeychainAccountKeys.pinHash(for: userId))
         try keychain.saveStandardData(salt, account: KeychainAccountKeys.pinSalt(for: userId))
         try keychain.deleteStandardData(account: KeychainAccountKeys.pinCooldown(for: userId))
+        await notifyAppLockPolicyChanged()
     }
 
     public func hasFallbackPin() async -> Bool {
@@ -109,6 +113,7 @@ public actor BiometricPinLockService: SecurityModuleProtocol {
         switch readResult {
         case .found:
             try await setBiometricEnabledFlag(true, for: userId)
+            await notifyAppLockPolicyChanged()
         case .notFoundOrInvalidated, .authFailedOrCanceled:
             try? keychain.deleteBiometricAppLockSecret(account: account)
             throw LockInDomainError.biometricUnavailable
@@ -119,6 +124,7 @@ public actor BiometricPinLockService: SecurityModuleProtocol {
         let userId = try isolationGuard.requireActiveUserId()
         try keychain.deleteBiometricAppLockSecret(account: KeychainAccountKeys.biometricAppLockSecret(for: userId))
         try await setBiometricEnabledFlag(false, for: userId)
+        await notifyAppLockPolicyChanged()
     }
 
     public func unlockWithBiometric(reason: String) async throws {
@@ -147,6 +153,7 @@ public actor BiometricPinLockService: SecurityModuleProtocol {
     public func recoverBiometricLockAfterInvalidation(usingPassword password: String) async throws {
         let userId = try await verifyAccountPasswordAndClearPinCooldown(password)
         try await reEnrollBiometricItem(for: userId)
+        await notifyAppLockPolicyChanged()
     }
 
     public func recoverBiometricLockAfterInvalidation(usingPin pin: String) async throws {
@@ -156,6 +163,15 @@ public actor BiometricPinLockService: SecurityModuleProtocol {
             throw LockInDomainError.invalidCredentials
         }
         try await reEnrollBiometricItem(for: userId)
+        await notifyAppLockPolicyChanged()
+    }
+
+    private func notifyAppLockPolicyChanged() async {
+        guard let syncEventBus else { return }
+        let required = await isAppLockRequired()
+        await MainActor.run {
+            syncEventBus.publish(.appLockPolicyChanged(isRequired: required))
+        }
     }
 
     public func unlockAndResetPinCooldown(usingPassword password: String) async throws {

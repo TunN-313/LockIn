@@ -14,6 +14,7 @@ public final class LocalAuthService: AuthModuleProtocol, @unchecked Sendable {
     private let notificationService: LocalNotificationServiceProtocol
     private let snapshotStore: AppGroupSnapshotStoreProtocol
     private let syncEventBus: SyncEventBus
+    private let schedulerPreferencesStore: SchedulerPreferencesFileStore?
 
     public init(
         studyStore: SwiftDataStudyStore,
@@ -22,7 +23,8 @@ public final class LocalAuthService: AuthModuleProtocol, @unchecked Sendable {
         crypto: PasswordCryptoServiceProtocol,
         notificationService: LocalNotificationServiceProtocol,
         snapshotStore: AppGroupSnapshotStoreProtocol,
-        syncEventBus: SyncEventBus
+        syncEventBus: SyncEventBus,
+        schedulerPreferencesStore: SchedulerPreferencesFileStore? = nil
     ) {
         self.studyStore = studyStore
         self.isolationGuard = isolationGuard
@@ -31,6 +33,7 @@ public final class LocalAuthService: AuthModuleProtocol, @unchecked Sendable {
         self.notificationService = notificationService
         self.snapshotStore = snapshotStore
         self.syncEventBus = syncEventBus
+        self.schedulerPreferencesStore = schedulerPreferencesStore
     }
 
     public func register(username: String, displayName: String, password: String) async throws -> UserProfileDTO {
@@ -283,10 +286,12 @@ public final class LocalAuthService: AuthModuleProtocol, @unchecked Sendable {
             state.nextTaskTitle = metadata.nextTaskTitle
         }
 
+        let frequency = schedulerPreferencesStore?.reminderFrequency(for: userId) ?? .off
         try await notificationService.resyncNotifications(
             forUserId: userId,
             schedules: metadata.schedules,
-            deckTitlesById: metadata.deckTitlesById
+            deckTitlesById: metadata.deckTitlesById,
+            reminderFrequency: frequency
         )
 
         WidgetCenter.shared.reloadAllTimelines()

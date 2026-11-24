@@ -47,6 +47,9 @@ public final class DependencyContainer {
     public static func makeLive(
         appGroupId: String = AppConstants.resolvedAppGroupIdentifier
     ) throws -> DependencyContainer {
+        guard let groupURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupId) else {
+            throw AppGroupStorageError.appGroupContainerUnavailable(groupId: appGroupId)
+        }
         let modelContainer = try SharedStoreContainer.makeShared(appGroupId: appGroupId)
         let snapshotStore = try AppGroupSnapshotStore.makeShared(appGroupId: appGroupId)
         let keychain = KeychainStorageService()
@@ -56,7 +59,9 @@ public final class DependencyContainer {
             keychain: keychain,
             notificationService: LocalNotificationService(),
             appGroupId: appGroupId,
-            enableDarwinObserver: true
+            enableDarwinObserver: true,
+            settingsDirectoryURL: groupURL,
+            photoLibrarySaver: PhotoLibrarySaver()
         )
     }
 
@@ -65,15 +70,21 @@ public final class DependencyContainer {
         snapshotStore: AppGroupSnapshotStoreProtocol,
         keychain: KeychainStorageProtocol,
         notificationService: LocalNotificationServiceProtocol = LocalNotificationService(),
-        enableDarwinObserver: Bool = false
+        enableDarwinObserver: Bool = false,
+        settingsDirectoryURL: URL? = nil,
+        photoLibrarySaver: PhotoLibrarySaverProtocol = PhotoLibrarySaver()
     ) -> DependencyContainer {
-        makeConfigured(
+        let fallbackSettingsDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LockInTestSettings-\(UUID().uuidString)", isDirectory: true)
+        return makeConfigured(
             modelContainer: modelContainer,
             snapshotStore: snapshotStore,
             keychain: keychain,
             notificationService: notificationService,
             appGroupId: AppConstants.defaultAppGroupIdentifier,
-            enableDarwinObserver: enableDarwinObserver
+            enableDarwinObserver: enableDarwinObserver,
+            settingsDirectoryURL: settingsDirectoryURL ?? fallbackSettingsDir,
+            photoLibrarySaver: photoLibrarySaver
         )
     }
 
@@ -87,7 +98,8 @@ public final class DependencyContainer {
             modelContainer: modelContainer,
             snapshotStore: snapshotStore,
             keychain: KeychainStorageService(),
-            enableDarwinObserver: false
+            enableDarwinObserver: false,
+            settingsDirectoryURL: testDir
         )
     }
 
@@ -97,7 +109,9 @@ public final class DependencyContainer {
         keychain: KeychainStorageProtocol,
         notificationService: LocalNotificationServiceProtocol,
         appGroupId: String,
-        enableDarwinObserver: Bool
+        enableDarwinObserver: Bool,
+        settingsDirectoryURL: URL,
+        photoLibrarySaver: PhotoLibrarySaverProtocol
     ) -> DependencyContainer {
         let syncEventBus = SyncEventBus(
             snapshotStore: snapshotStore,
@@ -105,6 +119,7 @@ public final class DependencyContainer {
         )
         let isolationGuard = UserDataIsolationGuard(keychain: keychain)
         let crypto = PasswordCryptoService()
+        let preferencesStore = SchedulerPreferencesFileStore(directoryURL: settingsDirectoryURL)
         let studyStore = SwiftDataStudyStore(
             modelContainer: modelContainer,
             isolationGuard: isolationGuard,
@@ -116,7 +131,8 @@ public final class DependencyContainer {
             studyStore: studyStore,
             isolationGuard: isolationGuard,
             keychain: keychain,
-            crypto: crypto
+            crypto: crypto,
+            syncEventBus: syncEventBus
         )
         let authService = LocalAuthService(
             studyStore: studyStore,
@@ -125,7 +141,8 @@ public final class DependencyContainer {
             crypto: crypto,
             notificationService: notificationService,
             snapshotStore: snapshotStore,
-            syncEventBus: syncEventBus
+            syncEventBus: syncEventBus,
+            schedulerPreferencesStore: preferencesStore
         )
 
         let parser = QuickImportParserService()
@@ -144,12 +161,6 @@ public final class DependencyContainer {
             taskProgressService: taskProgressService
         )
 
-        let schedulerService = StudyScheduleService(
-            studyStore: studyStore,
-            isolationGuard: isolationGuard,
-            notificationService: notificationService
-        )
-
         let catalogService = ThemeCatalogService(
             studyStore: studyStore,
             isolationGuard: isolationGuard,
@@ -165,6 +176,16 @@ public final class DependencyContainer {
             sharedRotationEngine: sharedRotationEngine
         )
 
+        let schedulerService = StudyScheduleService(
+            studyStore: studyStore,
+            isolationGuard: isolationGuard,
+            notificationService: notificationService,
+            snapshotStore: snapshotStore,
+            themeModule: themeService,
+            syncEventBus: syncEventBus,
+            preferencesStore: preferencesStore
+        )
+
         let permissionChecker = DevicePermissionChecker(appGroupId: appGroupId)
         let wallpaperRenderer = StudyWallpaperRenderService()
         let lockScreenService = LiveActivityBridgeService(
@@ -173,6 +194,8 @@ public final class DependencyContainer {
             snapshotStore: snapshotStore,
             permissionChecker: permissionChecker,
             wallpaperRenderer: wallpaperRenderer,
+            schedulerModule: schedulerService,
+            photoLibrarySaver: photoLibrarySaver,
             syncEventBus: syncEventBus
         )
 

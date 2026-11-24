@@ -67,8 +67,5 @@ public struct DailyProgressHeaderView: View {
             viewModel.startObserving()
             await viewModel.refresh()
         }
-        .onDisappear {
-            viewModel.stopObserving()
-        }
     }
 }

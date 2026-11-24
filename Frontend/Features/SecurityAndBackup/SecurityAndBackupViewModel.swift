@@ -106,6 +106,16 @@ public final class SecurityAndBackupViewModel {
         }
     }
 
+    public func readBackupFileForImport(at url: URL) -> Data? {
+        errorMessage = nil
+        do {
+            return try backupModule.readBoundedBackupFile(at: url)
+        } catch {
+            errorMessage = error.localizedDescription
+            return nil
+        }
+    }
+
     public func importEncryptedBackup(data: Data, passphrase: String, mode: BackupRestoreMode) async -> Bool {
         errorMessage = nil
         do {

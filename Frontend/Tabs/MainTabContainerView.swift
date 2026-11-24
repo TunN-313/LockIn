@@ -32,7 +32,7 @@ public struct MainTabContainerView: View {
                 }
                 .tag(LockInMainTab.studyHub)
 
-            ThemesTabView(container: container) {
+            ThemesTabView(container: container, reminderVM: reminderVM) {
                 Task {
                     await reminderVM.checkPendingReminders(showPopupEnabled: true, forceShow: true)
                 }

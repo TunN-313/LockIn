@@ -17,6 +17,9 @@ public struct LockInBackupDocument: FileDocument {
         guard let contents = configuration.file.regularFileContents else {
             throw CocoaError(.fileReadCorruptFile)
         }
+        guard contents.count <= AppConstants.maxBackupFileBytes else {
+            throw LockInDomainError.backupExceedsMaxSize
+        }
         self.data = contents
     }
 
@@ -134,16 +137,8 @@ public struct EncryptedBackupSheetView: View {
                 case .success(let url):
                     let needsStop = url.startAccessingSecurityScopedResource()
                     defer { if needsStop { url.stopAccessingSecurityScopedResource() } }
-                    do {
-                        let data = try Data(contentsOf: url)
-                        guard data.count <= AppConstants.maxBackupFileBytes else {
-                            viewModel.errorMessage = LockInDomainError.backupExceedsMaxSize.localizedDescription
-                            return
-                        }
+                    if let data = viewModel.readBackupFileForImport(at: url) {
                         pendingImportData = data
-                        viewModel.errorMessage = nil
-                    } catch {
-                        viewModel.errorMessage = error.localizedDescription
                     }
                 case .failure(let error):
                     viewModel.errorMessage = error.localizedDescription

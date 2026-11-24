@@ -50,9 +50,6 @@ public struct ThemeGalleryView: View {
             viewModel.startObserving()
             await viewModel.refresh()
         }
-        .onDisappear {
-            viewModel.stopObserving()
-        }
     }
 
     private func themePreviewCard(_ theme: ThemePalette) -> some View {

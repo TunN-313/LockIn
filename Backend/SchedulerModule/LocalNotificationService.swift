@@ -11,12 +11,37 @@ public protocol LocalNotificationServiceProtocol: Sendable {
     func resyncNotifications(
         forUserId userId: UUID,
         schedules: [StudyScheduleDTO],
-        deckTitlesById: [UUID: String]
+        deckTitlesById: [UUID: String],
+        reminderFrequency: ReminderNotificationFrequency
     ) async throws
+    func scheduleOneTimeSnooze(
+        forUserId userId: UUID,
+        afterMinutes: Int,
+        title: String,
+        body: String
+    ) async throws -> Date
+}
+
+public extension LocalNotificationServiceProtocol {
+    func resyncNotifications(
+        forUserId userId: UUID,
+        schedules: [StudyScheduleDTO],
+        deckTitlesById: [UUID: String]
+    ) async throws {
+        try await resyncNotifications(
+            forUserId: userId,
+            schedules: schedules,
+            deckTitlesById: deckTitlesById,
+            reminderFrequency: .off
+        )
+    }
 }
 
 public final class LocalNotificationService: LocalNotificationServiceProtocol {
+    public static let lockInAllPrefix = "lockin."
     public static let lockInNotificationPrefix = "lockin.schedule."
+    public static let periodicReminderPrefix = "lockin.reminder.freq."
+    public static let snoozeReminderPrefix = "lockin.reminder.snooze."
 
     public init() {}
 
@@ -40,7 +65,7 @@ public final class LocalNotificationService: LocalNotificationServiceProtocol {
         let pendingRequests = await center.pendingNotificationRequests()
         let pendingIds = pendingRequests
             .map(\.identifier)
-            .filter { $0.hasPrefix(Self.lockInNotificationPrefix) }
+            .filter { $0.hasPrefix(Self.lockInAllPrefix) }
         if !pendingIds.isEmpty {
             center.removePendingNotificationRequests(withIdentifiers: pendingIds)
         }
@@ -48,7 +73,7 @@ public final class LocalNotificationService: LocalNotificationServiceProtocol {
         let deliveredNotifications = await center.deliveredNotifications()
         let deliveredIds = deliveredNotifications
             .map { $0.request.identifier }
-            .filter { $0.hasPrefix(Self.lockInNotificationPrefix) }
+            .filter { $0.hasPrefix(Self.lockInAllPrefix) }
         if !deliveredIds.isEmpty {
             center.removeDeliveredNotifications(withIdentifiers: deliveredIds)
         }
@@ -57,7 +82,8 @@ public final class LocalNotificationService: LocalNotificationServiceProtocol {
     public func resyncNotifications(
         forUserId userId: UUID,
         schedules: [StudyScheduleDTO],
-        deckTitlesById: [UUID: String]
+        deckTitlesById: [UUID: String],
+        reminderFrequency: ReminderNotificationFrequency
     ) async throws {
         await cancelAllLockInNotifications()
 
@@ -88,5 +114,46 @@ public final class LocalNotificationService: LocalNotificationServiceProtocol {
                 try await center.add(request)
             }
         }
+
+        if reminderFrequency != .off {
+            for hour in reminderFrequency.scheduledHours {
+                let content = UNMutableNotificationContent()
+                content.title = "Nhắc nhở ôn tập LockIn"
+                content.body = "Kiểm tra thẻ và tác vụ tồn đọng hôm nay ngay trên LockIn."
+                content.sound = .default
+
+                var dateComponents = DateComponents()
+                dateComponents.hour = hour
+                dateComponents.minute = 0
+
+                let trigger = UNCalendarNotificationTrigger(dateMatching: dateComponents, repeats: true)
+                let identifier = "\(Self.periodicReminderPrefix)\(userId.uuidString).\(hour)"
+                let request = UNNotificationRequest(identifier: identifier, content: content, trigger: trigger)
+                try await center.add(request)
+            }
+        }
+    }
+
+    public func scheduleOneTimeSnooze(
+        forUserId userId: UUID,
+        afterMinutes: Int,
+        title: String,
+        body: String
+    ) async throws -> Date {
+        let center = UNUserNotificationCenter.current()
+        let identifier = "\(Self.snoozeReminderPrefix)\(userId.uuidString)"
+        center.removePendingNotificationRequests(withIdentifiers: [identifier])
+        center.removeDeliveredNotifications(withIdentifiers: [identifier])
+
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+
+        let interval = TimeInterval(max(60, afterMinutes * 60))
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: interval, repeats: false)
+        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: trigger)
+        try await center.add(request)
+        return Date().addingTimeInterval(interval)
     }
 }

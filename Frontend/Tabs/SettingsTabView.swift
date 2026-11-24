@@ -5,13 +5,11 @@ import SwiftUI
 
 public struct SettingsTabView: View {
     @Environment(\.lockInPalette) private var palette
-    private let container: DependencyContainer
 
     @State private var wizardVM: LockScreenWizardViewModel
     @State private var securityVM: SecurityAndBackupViewModel
 
     public init(container: DependencyContainer) {
-        self.container = container
         _wizardVM = State(initialValue: LockScreenWizardViewModel(
             lockScreenModule: container.lockScreen,
             themeModule: container.theme,
@@ -29,18 +27,19 @@ public struct SettingsTabView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
-                    LockScreenWizardView(
-                        viewModel: wizardVM,
-                        onRequestNotificationPermission: {
-                            _ = try? await container.scheduler.requestNotificationPermission()
-                        }
-                    )
+                    LockScreenWizardView(viewModel: wizardVM)
                     SecuritySettingsView(viewModel: securityVM)
                 }
                 .padding()
             }
             .background(Color(lockInHex: palette.backgroundHex).ignoresSafeArea())
             .navigationTitle("Cài đặt & Kết nối")
+            .onAppear {
+                wizardVM.startObserving()
+            }
+            .onDisappear {
+                wizardVM.stopObserving()
+            }
         }
     }
 }

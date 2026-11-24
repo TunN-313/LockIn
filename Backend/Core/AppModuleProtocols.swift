@@ -349,6 +349,61 @@ public enum BackupRestoreMode: String, Codable, CaseIterable, Sendable {
     case overwrite
 }
 
+public enum ReminderNotificationFrequency: String, Codable, CaseIterable, Sendable {
+    case off
+    case daily
+    case twiceDaily
+    case every4Hours
+
+    public var displayName: String {
+        switch self {
+        case .off:
+            return "Tắt thông báo định kỳ"
+        case .daily:
+            return "Mỗi ngày 1 lần (20:00)"
+        case .twiceDaily:
+            return "2 lần mỗi ngày (09:00 & 20:00)"
+        case .every4Hours:
+            return "Mỗi 4 giờ (08:00–20:00)"
+        }
+    }
+
+    public var scheduledHours: [Int] {
+        switch self {
+        case .off:
+            return []
+        case .daily:
+            return [20]
+        case .twiceDaily:
+            return [9, 20]
+        case .every4Hours:
+            return [8, 12, 16, 20]
+        }
+    }
+}
+
+public struct ScheduledSessionActivationResult: Equatable, Sendable {
+    public let schedule: StudyScheduleDTO
+    public let prioritizedDeckId: UUID
+    public let prioritizedDeckTitle: String
+    public let didRotateTheme: Bool
+    public let activeThemeId: String
+
+    public init(
+        schedule: StudyScheduleDTO,
+        prioritizedDeckId: UUID,
+        prioritizedDeckTitle: String,
+        didRotateTheme: Bool,
+        activeThemeId: String
+    ) {
+        self.schedule = schedule
+        self.prioritizedDeckId = prioritizedDeckId
+        self.prioritizedDeckTitle = prioritizedDeckTitle
+        self.didRotateTheme = didRotateTheme
+        self.activeThemeId = activeThemeId
+    }
+}
+
 public struct WallpaperRenderPayload: Equatable, Sendable {
     public let deckTitle: String
     public let pngData: Data
@@ -470,6 +525,12 @@ public protocol SchedulerModuleProtocol: Sendable {
     func nextScheduledDate(for schedule: StudyScheduleDTO, after referenceDate: Date) -> Date?
     func requestNotificationPermission() async throws -> Bool
     func syncLocalNotifications() async throws
+    func fetchReminderFrequency() async throws -> ReminderNotificationFrequency
+    func updateReminderFrequency(_ frequency: ReminderNotificationFrequency) async throws -> ReminderNotificationFrequency
+    func scheduleSnoozeReminder(afterMinutes: Int, suggestedDeckTitle: String?) async throws -> Date
+    func activeOrDueSchedule(at referenceDate: Date) async throws -> StudyScheduleDTO?
+    func activateScheduledSession(scheduleId: UUID) async throws -> ScheduledSessionActivationResult
+    func applyDueScheduleIfNeeded(at referenceDate: Date) async throws -> ScheduledSessionActivationResult?
 }
 
 public protocol ThemeModuleProtocol: Sendable {
@@ -479,6 +540,7 @@ public protocol ThemeModuleProtocol: Sendable {
     func updateShuffleConfiguration(isEnabled: Bool, poolIds: [String], rotateOnAppOpen: Bool, rotateOnShortcutTrigger: Bool) async throws -> ThemePreferenceDTO
     func updateLockScreenDisplayOptions(fontScale: LockScreenFontScale, hideAnswerByDefault: Bool, privacyModeEnabled: Bool, showPopupOnOpen: Bool) async throws -> ThemePreferenceDTO
     func rotateThemeIfNeeded(triggerOnAppOpen: Bool) async throws -> ThemePalette
+    func rotateThemeForScheduledSession() async throws -> ThemePalette
 }
 
 public protocol LockScreenModuleProtocol: Sendable {
@@ -488,10 +550,13 @@ public protocol LockScreenModuleProtocol: Sendable {
     func syncSnapshotFromStore() async throws
     /// Render ảnh PNG tóm tắt bài ôn (3–5 dòng) theo theme để lưu vào Photos đặt hình nền thủ công.
     func renderStudyWallpaperPNG(deckId: UUID?, maxLines: Int) async throws -> WallpaperRenderPayload
+    func requestNotificationPermissionForWizard() async throws -> Bool
+    func saveWallpaperPNGToPhotos(_ pngData: Data) async throws
 }
 
 public protocol BackupModuleProtocol: Sendable {
     func exportEncryptedBackup(passphrase: String) async throws -> Data
+    func readBoundedBackupFile(at url: URL) throws -> Data
     func importEncryptedBackup(_ data: Data, passphrase: String, mode: BackupRestoreMode) async throws
 }
 

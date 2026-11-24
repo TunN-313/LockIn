@@ -36,7 +36,7 @@ public final class DailyProgressHeaderViewModel {
                 switch event {
                 case .cardsChanged, .tasksChanged, .progressUpdated, .externalStateRefreshed, .userSessionChanged:
                     await self.refresh()
-                case .themeRotated:
+                case .themeRotated, .appLockPolicyChanged:
                     break
                 }
             }

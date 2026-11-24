@@ -142,8 +142,16 @@ public struct DeckDetailCardsView: View {
         .background(Color(lockInHex: palette.backgroundHex).ignoresSafeArea())
         .navigationTitle(deck?.title ?? "Chi tiết bộ đề")
         .navigationBarTitleDisplayMode(.inline)
-        .task {
+        .task(id: deckId) {
+            viewModel.openedDeckId = deckId
+            viewModel.startObserving()
+            await viewModel.refreshDecks()
             await viewModel.loadCards(forDeckId: deckId)
+        }
+        .onDisappear {
+            if viewModel.openedDeckId == deckId {
+                viewModel.openedDeckId = nil
+            }
         }
         .sheet(isPresented: $isPresentingCardEditor) {
             cardEditorSheet

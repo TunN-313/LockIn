@@ -71,9 +71,6 @@ public struct DeckListView: View {
             viewModel.startObserving()
             await viewModel.refreshDecks()
         }
-        .onDisappear {
-            viewModel.stopObserving()
-        }
         .sheet(isPresented: $isPresentingEditor) {
             deckEditorSheet
         }

@@ -10,6 +10,7 @@ public enum SyncDomainEvent: Equatable, Sendable {
     case progressUpdated
     case themeRotated(themeId: String)
     case userSessionChanged(activeUserId: UUID?)
+    case appLockPolicyChanged(isRequired: Bool)
     case externalStateRefreshed(snapshotVersion: Int)
 }
 

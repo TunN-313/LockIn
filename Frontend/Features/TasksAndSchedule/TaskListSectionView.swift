@@ -109,9 +109,6 @@ public struct TaskListSectionView: View {
             viewModel.startObserving()
             await viewModel.refresh()
         }
-        .onDisappear {
-            viewModel.stopObserving()
-        }
         .sheet(isPresented: $isPresentingEditor) {
             taskEditorSheet
         }

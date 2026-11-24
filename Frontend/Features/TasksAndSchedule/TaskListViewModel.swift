@@ -29,7 +29,7 @@ public final class TaskListViewModel {
                 switch event {
                 case .tasksChanged, .cardsChanged, .externalStateRefreshed, .userSessionChanged:
                     await self.refresh()
-                case .progressUpdated, .themeRotated:
+                case .progressUpdated, .themeRotated, .appLockPolicyChanged:
                     break
                 }
             }

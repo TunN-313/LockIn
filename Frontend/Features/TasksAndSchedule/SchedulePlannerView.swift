@@ -73,12 +73,27 @@ public struct SchedulePlannerView: View {
                             Text(viewModel.deckTitle(for: schedule.deckId))
                                 .font(.caption)
                                 .foregroundStyle(Color(lockInHex: palette.textSecondaryHex))
-                            Text(viewModel.nextOccurrenceText(for: schedule))
-                                .font(.caption2)
-                                .foregroundStyle(Color(lockInHex: palette.accentHex))
+                            HStack(spacing: 8) {
+                                Text(viewModel.nextOccurrenceText(for: schedule))
+                                    .font(.caption2)
+                                    .foregroundStyle(Color(lockInHex: palette.accentHex))
+                                if schedule.autoRotateTheme {
+                                    Label("Đổi theme", systemImage: "paintpalette")
+                                        .font(.caption2.weight(.medium))
+                                        .foregroundStyle(Color(lockInHex: palette.textSecondaryHex))
+                                }
+                            }
                         }
 
                         Spacer()
+
+                        Button {
+                            Task { await viewModel.activateScheduledSession(schedule.id) }
+                        } label: {
+                            Image(systemName: "play.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityLabel("Bắt đầu phiên lịch")
 
                         Button {
                             openEditor(for: schedule)
@@ -106,9 +121,6 @@ public struct SchedulePlannerView: View {
         .task {
             viewModel.startObserving()
             await viewModel.refresh()
-        }
-        .onDisappear {
-            viewModel.stopObserving()
         }
         .sheet(isPresented: $isPresentingEditor) {
             scheduleEditorSheet
@@ -146,12 +158,16 @@ public struct SchedulePlannerView: View {
                     }
                 }
 
-                Section("Tùy chọn") {
+                Section {
                     Toggle("Kích hoạt lịch", isOn: $draftEnabled)
                     Toggle("Đổi theme khi tới phiên học", isOn: $draftAutoRotate)
                     Button("Xin quyền thông báo ngay") {
                         Task { await viewModel.requestNotificationPermission() }
                     }
+                } header: {
+                    Text("Tùy chọn")
+                } footer: {
+                    Text("Thông báo nhắc đúng giờ hẹn; bộ đề ưu tiên và đổi theme được áp dụng khi mở LockIn trong khung giờ lịch hoặc nhấn Bắt đầu.")
                 }
             }
             .navigationTitle(editingSchedule == nil ? "Thêm lịch học" : "Chỉnh sửa lịch")

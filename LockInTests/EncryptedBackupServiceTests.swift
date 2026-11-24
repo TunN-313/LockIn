@@ -264,4 +264,45 @@ final class EncryptedBackupServiceTests: XCTestCase {
         XCTAssertEqual(finalDecksA.count, 1)
         XCTAssertEqual(finalCardsA.count, 1)
     }
+
+    @MainActor
+    func testReadBoundedBackupFileRejectsOversizedAndReadsValidFile() async throws {
+        let env = try LockInTestEnvironment()
+        defer { env.cleanup() }
+        let userCredential = "BoundedAuth#2026"
+        let backupPhrase = "BoundedPass#2026"
+
+        _ = try await env.container.auth.register(
+            username: "bounded_backup_user",
+            displayName: "Bounded User",
+            password: userCredential
+        )
+        let deck = try await env.container.study.createDeck(
+            title: "Bounded Deck",
+            subjectTag: "Security",
+            accentHex: "#2563EB",
+            examDate: nil,
+            dailyGoal: 10
+        )
+
+        let oversizedURL = env.tempDirectoryURL.appendingPathComponent("oversized.lockinbackup")
+        let oversizedData = Data(count: AppConstants.maxBackupFileBytes + 2_048)
+        try oversizedData.write(to: oversizedURL)
+
+        XCTAssertThrowsError(try env.container.backup.readBoundedBackupFile(at: oversizedURL)) { error in
+            XCTAssertEqual(error as? LockInDomainError, .backupExceedsMaxSize)
+        }
+
+        let exportedData = try await env.container.backup.exportEncryptedBackup(passphrase: backupPhrase)
+        let validURL = env.tempDirectoryURL.appendingPathComponent("valid.lockinbackup")
+        try exportedData.write(to: validURL)
+
+        let readData = try env.container.backup.readBoundedBackupFile(at: validURL)
+        XCTAssertEqual(readData, exportedData)
+
+        try await env.container.study.deleteDeck(deckId: deck.id)
+        try await env.container.backup.importEncryptedBackup(readData, passphrase: backupPhrase, mode: .overwrite)
+        let restoredDecks = try await env.container.study.fetchDecks()
+        XCTAssertEqual(restoredDecks.map(\.title), ["Bounded Deck"])
+    }
 }

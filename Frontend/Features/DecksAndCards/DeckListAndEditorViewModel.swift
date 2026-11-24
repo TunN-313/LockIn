@@ -14,6 +14,7 @@ public final class DeckListAndEditorViewModel {
 
     public var decks: [StudyDeckDTO] = []
     public var cardsByDeckId: [UUID: [StudyCardDTO]] = [:]
+    public var openedDeckId: UUID?
     public var activeDeckIdOnLockScreen: UUID?
     public var isLoading: Bool = false
     public var statusMessage: String?
@@ -43,10 +44,10 @@ public final class DeckListAndEditorViewModel {
                     } else {
                         await self.reloadOpenedDeckCards()
                     }
-                case .externalStateRefreshed, .userSessionChanged:
+                case .progressUpdated, .externalStateRefreshed, .userSessionChanged:
                     await self.refreshDecks()
                     await self.reloadOpenedDeckCards()
-                case .tasksChanged, .progressUpdated, .themeRotated:
+                case .tasksChanged, .themeRotated, .appLockPolicyChanged:
                     break
                 }
             }
@@ -81,7 +82,11 @@ public final class DeckListAndEditorViewModel {
     }
 
     private func reloadOpenedDeckCards() async {
-        for deckId in cardsByDeckId.keys {
+        var targetIds = Set(cardsByDeckId.keys)
+        if let openedDeckId {
+            targetIds.insert(openedDeckId)
+        }
+        for deckId in targetIds {
             await loadCards(forDeckId: deckId)
         }
     }

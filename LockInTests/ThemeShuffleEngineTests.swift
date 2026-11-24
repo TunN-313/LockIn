@@ -121,4 +121,55 @@ final class ThemeShuffleEngineTests: XCTestCase {
         let decoded = try JSONDecoder().decode(StudySessionAttributes.ContentState.self, from: encoded)
         XCTAssertTrue(decoded.isWithinActivityKitPayloadLimit)
     }
+
+    @MainActor
+    func testLockScreenWizardDelegatesNotificationsAndPhotoSaveToBackend() async throws {
+        let env = try LockInTestEnvironment()
+        defer { env.cleanup() }
+        let userCredential = "WizardOwner#2026"
+
+        _ = try await env.container.auth.register(
+            username: "wizard_delegate_tester",
+            displayName: "Wizard Tester",
+            password: userCredential
+        )
+        let deck = try await env.container.study.createDeck(
+            title: "Wizard Deck",
+            subjectTag: "Physics",
+            accentHex: "#2563EB",
+            examDate: nil,
+            dailyGoal: 10
+        )
+        _ = try await env.container.study.upsertCard(
+            cardId: nil,
+            deckId: deck.id,
+            question: "E = ?",
+            answer: "mc^2",
+            hintOrNote: "",
+            status: .new
+        )
+
+        env.notificationService.authorized = false
+        let denied = try await env.container.lockScreen.requestNotificationPermissionForWizard()
+        XCTAssertFalse(denied)
+
+        env.notificationService.authorized = true
+        let granted = try await env.container.lockScreen.requestNotificationPermissionForWizard()
+        XCTAssertTrue(granted)
+
+        let payload = try await env.container.lockScreen.renderStudyWallpaperPNG(deckId: deck.id, maxLines: 3)
+        try await env.container.lockScreen.saveWallpaperPNGToPhotos(payload.pngData)
+        XCTAssertEqual(env.photoLibrarySaver.savedPayloads.count, 1)
+        XCTAssertEqual(env.photoLibrarySaver.savedPayloads.first, payload.pngData)
+
+        env.photoLibrarySaver.allowSave = false
+        do {
+            try await env.container.lockScreen.saveWallpaperPNGToPhotos(payload.pngData)
+            XCTFail("Khi không có quyền Photos phải ném lỗi.")
+        } catch let error as LockInDomainError {
+            guard case .validationFailed = error else {
+                return XCTFail("Kỳ vọng validationFailed, nhận: \(error)")
+            }
+        }
+    }
 }
