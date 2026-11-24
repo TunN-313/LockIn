@@ -326,4 +326,79 @@ final class ThemeShuffleEngineTests: XCTestCase {
         XCTAssertTrue(snap2.privacyModeEnabled)
         XCTAssertEqual(snap2.fontScaleRaw, LockScreenFontScale.large.rawValue)
     }
+
+    @MainActor
+    func testSharedThemeRotationEngineRespectsShuffleAndShortcutToggleWhenNoScheduleIsDue() async throws {
+        let env = try LockInTestEnvironment()
+        defer { env.cleanup() }
+        let credential = "ShortcutToggle#2026"
+
+        _ = try await env.container.auth.register(
+            username: "shortcut_toggle_owner",
+            displayName: "Shortcut Toggle Owner",
+            password: credential
+        )
+
+        let sharedEngine = SharedThemeRotationEngine(
+            modelContainer: env.modelContainer,
+            snapshotStore: env.snapshotStore
+        )
+        let cal = Calendar.current
+        let checkDate = try XCTUnwrap(cal.date(from: DateComponents(year: 2026, month: 11, day: 24, hour: 14, minute: 0)))
+
+        // Trường hợp 1: Không có lịch đến hạn, rotateOnShortcutTrigger = true nhưng isShuffleEnabled = false -> KHÔNG được xoay theme.
+        _ = try await env.container.theme.updateShuffleConfiguration(
+            isEnabled: false,
+            poolIds: [ThemePalette.minimalPaper.id, ThemePalette.midnightInk.id],
+            rotateOnAppOpen: false,
+            rotateOnShortcutTrigger: true
+        )
+        let versionBeforeCase1 = try env.snapshotStore.loadSnapshot().snapshotVersion
+        let resultCase1 = try await sharedEngine.rotateThemeInSharedStore(referenceDate: checkDate, calendar: cal)
+        XCTAssertFalse(resultCase1.didRotateTheme)
+        XCTAssertNil(resultCase1.prioritizedDeckId)
+        XCTAssertEqual(resultCase1.nextTheme.id, ThemePalette.minimalPaper.id)
+        XCTAssertEqual(resultCase1.snapshotVersion, versionBeforeCase1)
+        let snapCase1 = try env.snapshotStore.loadSnapshot()
+        XCTAssertEqual(snapCase1.activeThemeId, ThemePalette.minimalPaper.id)
+        XCTAssertEqual(snapCase1.snapshotVersion, versionBeforeCase1)
+        let prefCase1 = try await env.container.theme.fetchPreference()
+        XCTAssertEqual(prefCase1.activeThemeId, ThemePalette.minimalPaper.id)
+
+        // Trường hợp 2: Không có lịch đến hạn, isShuffleEnabled = true nhưng rotateOnShortcutTrigger = false -> KHÔNG được xoay theme.
+        _ = try await env.container.theme.updateShuffleConfiguration(
+            isEnabled: true,
+            poolIds: [ThemePalette.minimalPaper.id, ThemePalette.midnightInk.id],
+            rotateOnAppOpen: false,
+            rotateOnShortcutTrigger: false
+        )
+        let versionBeforeCase2 = try env.snapshotStore.loadSnapshot().snapshotVersion
+        let resultCase2 = try await sharedEngine.rotateThemeInSharedStore(referenceDate: checkDate, calendar: cal)
+        XCTAssertFalse(resultCase2.didRotateTheme)
+        XCTAssertNil(resultCase2.prioritizedDeckId)
+        XCTAssertEqual(resultCase2.nextTheme.id, ThemePalette.minimalPaper.id)
+        XCTAssertEqual(resultCase2.snapshotVersion, versionBeforeCase2)
+        let snapCase2 = try env.snapshotStore.loadSnapshot()
+        XCTAssertEqual(snapCase2.activeThemeId, ThemePalette.minimalPaper.id)
+        let prefCase2 = try await env.container.theme.fetchPreference()
+        XCTAssertEqual(prefCase2.activeThemeId, ThemePalette.minimalPaper.id)
+
+        // Trường hợp 3: Không có lịch đến hạn, cả isShuffleEnabled và rotateOnShortcutTrigger đều bật -> Xoay sang midnightInk.
+        _ = try await env.container.theme.updateShuffleConfiguration(
+            isEnabled: true,
+            poolIds: [ThemePalette.minimalPaper.id, ThemePalette.midnightInk.id],
+            rotateOnAppOpen: false,
+            rotateOnShortcutTrigger: true
+        )
+        let versionBeforeCase3 = try env.snapshotStore.loadSnapshot().snapshotVersion
+        let resultCase3 = try await sharedEngine.rotateThemeInSharedStore(referenceDate: checkDate, calendar: cal)
+        XCTAssertTrue(resultCase3.didRotateTheme)
+        XCTAssertNil(resultCase3.prioritizedDeckId)
+        XCTAssertEqual(resultCase3.nextTheme.id, ThemePalette.midnightInk.id)
+        XCTAssertGreaterThan(resultCase3.snapshotVersion, versionBeforeCase3)
+        let snapCase3 = try env.snapshotStore.loadSnapshot()
+        XCTAssertEqual(snapCase3.activeThemeId, ThemePalette.midnightInk.id)
+        let prefCase3 = try await env.container.theme.fetchPreference()
+        XCTAssertEqual(prefCase3.activeThemeId, ThemePalette.midnightInk.id)
+    }
 }

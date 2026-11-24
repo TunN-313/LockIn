@@ -44,11 +44,21 @@ public final class ThemeCatalogService: ThemeCatalogServiceProtocol, @unchecked 
         }
     }
 
+    private struct ThemePreferenceCommitResult: Sendable {
+        let dto: ThemePreferenceDTO
+        let snapshot: LockScreenSnapshot
+    }
+
     public func selectTheme(themeId: String) async throws -> ThemePreferenceDTO {
         let validPalette = ThemePalette.palette(for: themeId)
-        return try await mutatePreference { pref in
-            pref.activeThemeId = validPalette.id
-        }
+        return try await mutatePreference(
+            { pref in
+                pref.activeThemeId = validPalette.id
+            },
+            syncSnapshot: { pref, state in
+                state.activeThemeId = pref.activeThemeId
+            }
+        )
     }
 
     public func updateShuffleConfiguration(
@@ -71,12 +81,19 @@ public final class ThemeCatalogService: ThemeCatalogServiceProtocol, @unchecked 
             cleanPool = [ThemePalette.minimalPaper.id, ThemePalette.darkFocus.id]
         }
 
-        return try await mutatePreference { pref in
-            pref.isShuffleEnabled = isEnabled
-            pref.shufflePoolIds = cleanPool
-            pref.rotateOnAppOpen = rotateOnAppOpen
-            pref.rotateOnShortcutTrigger = rotateOnShortcutTrigger
-        }
+        let finalPool = cleanPool
+        return try await mutatePreference(
+            { pref in
+                pref.isShuffleEnabled = isEnabled
+                pref.shufflePoolIds = finalPool
+                pref.rotateOnAppOpen = rotateOnAppOpen
+                pref.rotateOnShortcutTrigger = rotateOnShortcutTrigger
+            },
+            syncSnapshot: { pref, state in
+                state.isShuffleEnabled = pref.isShuffleEnabled
+                state.shufflePoolIds = pref.shufflePoolIds
+            }
+        )
     }
 
     public func updateLockScreenDisplayOptions(
@@ -85,33 +102,58 @@ public final class ThemeCatalogService: ThemeCatalogServiceProtocol, @unchecked 
         privacyModeEnabled: Bool,
         showPopupOnOpen: Bool
     ) async throws -> ThemePreferenceDTO {
-        return try await mutatePreference { pref in
-            pref.fontScale = fontScale
-            pref.hideAnswerByDefault = hideAnswerByDefault
-            pref.privacyModeEnabled = privacyModeEnabled
-            pref.showPopupOnOpen = showPopupOnOpen
-        }
+        return try await mutatePreference(
+            { pref in
+                pref.fontScale = fontScale
+                pref.hideAnswerByDefault = hideAnswerByDefault
+                pref.privacyModeEnabled = privacyModeEnabled
+                pref.showPopupOnOpen = showPopupOnOpen
+            },
+            syncSnapshot: { pref, state in
+                state.privacyModeEnabled = pref.privacyModeEnabled
+                state.fontScaleRaw = pref.fontScale.rawValue
+            }
+        )
     }
 
-    private func mutatePreference(_ update: @Sendable (ThemePreference) -> Void) async throws -> ThemePreferenceDTO {
+    private func mutatePreference(
+        _ update: @Sendable (ThemePreference) -> Void,
+        syncSnapshot: @Sendable (ThemePreference, inout LockScreenSnapshot) -> Void
+    ) async throws -> ThemePreferenceDTO {
         let session = try isolationGuard.requireActiveSession()
-        let dto = try await studyStore.perform { context in
-            let pref = try Self.fetchOrCreatePreference(for: session.userId, in: context)
-            update(pref)
-            try context.save()
-            return Self.toDTO(pref)
+        let guardService = self.isolationGuard
+        let store = self.snapshotStore
+
+        let commitResult: ThemePreferenceCommitResult = try await studyStore.perform { context -> ThemePreferenceCommitResult in
+            guard guardService.currentUserId() == session.userId,
+                  guardService.currentSessionEpoch() == session.sessionEpoch else {
+                throw AppGroupStorageError.sessionInvalidatedOrLoggedOut
+            }
+
+            var committedDTO: ThemePreferenceDTO?
+            let updatedSnapshot = try store.mutateSnapshotIfSessionMatches(
+                expectedUserId: session.userId,
+                expectedSessionEpoch: session.sessionEpoch
+            ) { state in
+                guard guardService.currentUserId() == session.userId,
+                      guardService.currentSessionEpoch() == session.sessionEpoch else {
+                    throw AppGroupStorageError.sessionInvalidatedOrLoggedOut
+                }
+                let pref = try Self.fetchOrCreatePreference(for: session.userId, in: context)
+                update(pref)
+                try context.save()
+                syncSnapshot(pref, &state)
+                committedDTO = Self.toDTO(pref)
+            }
+
+            guard let dto = committedDTO else {
+                throw AppGroupStorageError.storageIOFailure("Không lưu được ThemePreference.")
+            }
+            return ThemePreferenceCommitResult(dto: dto, snapshot: updatedSnapshot)
         }
 
-        let updatedSnapshot = try snapshotStore.mutateSnapshotIfSessionMatches(
-            expectedUserId: session.userId,
-            expectedSessionEpoch: session.sessionEpoch
-        ) { state in
-            state.activeThemeId = dto.activeThemeId
-            state.isShuffleEnabled = dto.isShuffleEnabled
-            state.shufflePoolIds = dto.shufflePoolIds
-            state.privacyModeEnabled = dto.privacyModeEnabled
-            state.fontScaleRaw = dto.lockScreenFontScale.rawValue
-        }
+        let dto = commitResult.dto
+        let updatedSnapshot = commitResult.snapshot
 
         if updatedSnapshot.activeDeckId != nil {
             let contentState = SharedCardNavigationEngine.makeContentState(from: updatedSnapshot)

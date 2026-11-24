@@ -228,13 +228,23 @@ public final class SharedThemeRotationEngine: SharedThemeRotationEngineProtocol,
 
             let currentThemeId = preference?.activeThemeId ?? initialSnapshot.activeThemeId
             let poolIds = preference?.shufflePoolIds ?? initialSnapshot.shufflePoolIds
+            let shortcutShuffleAllowed = (preference?.isShuffleEnabled ?? initialSnapshot.isShuffleEnabled)
+                && (preference?.rotateOnShortcutTrigger ?? false)
             let shouldRotateTheme: Bool = {
                 if let dueMatch, prioritizedDeck != nil {
-                    return dueMatch.schedule.autoRotateTheme
-                        || ((preference?.isShuffleEnabled ?? initialSnapshot.isShuffleEnabled) && (preference?.rotateOnShortcutTrigger ?? true))
+                    return dueMatch.schedule.autoRotateTheme || shortcutShuffleAllowed
                 }
-                return true
+                return shortcutShuffleAllowed
             }()
+            if !shouldRotateTheme && prioritizedDeck == nil {
+                return ThemeRotationResult(
+                    previousThemeId: currentThemeId,
+                    nextTheme: ThemePalette.palette(for: currentThemeId),
+                    snapshotVersion: initialSnapshot.snapshotVersion,
+                    prioritizedDeckId: nil,
+                    didRotateTheme: false
+                )
+            }
             let targetThemeId = shouldRotateTheme
                 ? Self.selectNextThemeId(currentThemeId: currentThemeId, shufflePoolIds: poolIds)
                 : currentThemeId

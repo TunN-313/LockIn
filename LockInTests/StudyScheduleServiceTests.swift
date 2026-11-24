@@ -632,4 +632,228 @@ final class StudyScheduleServiceTests: XCTestCase {
         XCTAssertTrue(afterSnap.privacyModeEnabled)
         XCTAssertEqual(afterSnap.fontScaleRaw, LockScreenFontScale.large.rawValue)
     }
+
+    @MainActor
+    func testActivateScheduledSessionCoordinatesSwiftDataAndSnapshotUnderRevisionConflictAndConcurrency() async throws {
+        // Phần 1: Tiêm xung đột revision đúng lúc activateScheduledSession sắp ghi snapshot -> phải rollback bản stale,
+        // thử lại trên revision mới và giữ cho SwiftData ThemePreference.activeThemeId khớp 100% với snapshot.
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LockInConflictTest-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let modelContainer = try SharedStoreContainer.makeInMemoryForTesting()
+        let baseStore = try AppGroupSnapshotStore.makeForTesting(directoryURL: tempDir)
+        let injectingStore = ConcurrentRevisionInjectingSnapshotStore(base: baseStore)
+        let container = DependencyContainer.makeForTesting(
+            modelContainer: modelContainer,
+            snapshotStore: injectingStore,
+            keychain: InMemoryKeychainStorage(),
+            notificationService: InMemoryLocalNotificationService(),
+            enableDarwinObserver: false,
+            settingsDirectoryURL: tempDir
+        )
+
+        let credential = "AtomicConflict#2026"
+        let user = try await container.auth.register(
+            username: "atomic_conflict_user",
+            displayName: "Atomic Conflict User",
+            password: credential
+        )
+        _ = try await container.theme.updateShuffleConfiguration(
+            isEnabled: false,
+            poolIds: [ThemePalette.minimalPaper.id, ThemePalette.darkFocus.id],
+            rotateOnAppOpen: false,
+            rotateOnShortcutTrigger: false
+        )
+        let deck = try await container.study.createDeck(
+            title: "Concurrency Deck",
+            subjectTag: "Systems",
+            accentHex: "#2563EB",
+            examDate: nil,
+            dailyGoal: 10
+        )
+        _ = try await container.study.upsertCard(
+            cardId: nil,
+            deckId: deck.id,
+            question: "Atomic Q",
+            answer: "Atomic A",
+            hintOrNote: "",
+            status: .new
+        )
+        let schedule = try await container.scheduler.saveSchedule(
+            scheduleId: nil,
+            deckId: deck.id,
+            title: "Lịch tranh chấp",
+            hour: 19,
+            minute: 0,
+            weekdaysMask: 0b1111111,
+            isEnabled: true,
+            autoRotateTheme: true
+        )
+
+        let snapBefore = try baseStore.loadSnapshot()
+        let epoch = try XCTUnwrap(snapBefore.sessionEpoch)
+        injectingStore.armOneShotBeforeRevisionCheck {
+            _ = try baseStore.mutateSnapshotIfSessionMatches(
+                expectedUserId: user.id,
+                expectedSessionEpoch: epoch
+            ) { state in
+                state.activeThemeId = ThemePalette.darkFocus.id
+                state.privacyModeEnabled = true
+            }
+        }
+
+        // Lần thử 1 thấy minimalPaper -> định xoay sang darkFocus nhưng gặp staleSnapshotRevision;
+        // lần thử 2 đọc snapshot mới nhất (đang là darkFocus) -> xoay về minimalPaper và giữ Privacy Mode.
+        let conflictActivation = try await container.scheduler.activateScheduledSession(scheduleId: schedule.id)
+        XCTAssertEqual(conflictActivation.activeThemeId, ThemePalette.minimalPaper.id)
+        let snapAfterConflict = try baseStore.loadSnapshot()
+        let prefAfterConflict = try await container.theme.fetchPreference()
+        XCTAssertEqual(snapAfterConflict.activeThemeId, ThemePalette.minimalPaper.id)
+        XCTAssertEqual(prefAfterConflict.activeThemeId, snapAfterConflict.activeThemeId)
+        XCTAssertTrue(snapAfterConflict.privacyModeEnabled)
+
+        // Phần 2: Chạy song song activateScheduledSession và selectTheme nhiều vòng -> SwiftData và snapshot luôn đồng bộ.
+        let raceEnv = try LockInTestEnvironment()
+        defer { raceEnv.cleanup() }
+        _ = try await raceEnv.container.auth.register(
+            username: "atomic_race_user",
+            displayName: "Atomic Race User",
+            password: credential
+        )
+        _ = try await raceEnv.container.theme.updateShuffleConfiguration(
+            isEnabled: true,
+            poolIds: [ThemePalette.minimalPaper.id, ThemePalette.darkFocus.id, ThemePalette.midnightInk.id],
+            rotateOnAppOpen: false,
+            rotateOnShortcutTrigger: true
+        )
+        let raceDeck = try await raceEnv.container.study.createDeck(
+            title: "Race Deck",
+            subjectTag: "OS",
+            accentHex: "#16A34A",
+            examDate: nil,
+            dailyGoal: 10
+        )
+        _ = try await raceEnv.container.study.upsertCard(
+            cardId: nil,
+            deckId: raceDeck.id,
+            question: "Race Q",
+            answer: "Race A",
+            hintOrNote: "",
+            status: .new
+        )
+        let raceSchedule = try await raceEnv.container.scheduler.saveSchedule(
+            scheduleId: nil,
+            deckId: raceDeck.id,
+            title: "Lịch song song",
+            hour: 21,
+            minute: 0,
+            weekdaysMask: 0b1111111,
+            isEnabled: true,
+            autoRotateTheme: true
+        )
+
+        let schedulerService = raceEnv.container.scheduler
+        let themeService = raceEnv.container.theme
+        let scheduleId = raceSchedule.id
+        let chosenThemes = [
+            ThemePalette.warmSand.id,
+            ThemePalette.pastelMatcha.id,
+            ThemePalette.examHighContrast.id,
+            ThemePalette.midnightInk.id,
+            ThemePalette.darkFocus.id,
+            ThemePalette.minimalPaper.id
+        ]
+
+        for chosenTheme in chosenThemes {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    _ = try await schedulerService.activateScheduledSession(scheduleId: scheduleId)
+                }
+                group.addTask {
+                    _ = try await themeService.selectTheme(themeId: chosenTheme)
+                }
+                try await group.waitForAll()
+            }
+
+            let snap = try raceEnv.snapshotStore.loadSnapshot()
+            let pref = try await raceEnv.container.theme.fetchPreference()
+            XCTAssertEqual(snap.activeThemeId, pref.activeThemeId)
+        }
+    }
+}
+
+private final class ConcurrentRevisionInjectingSnapshotStore: AppGroupSnapshotStoreProtocol, @unchecked Sendable {
+    private let base: AppGroupSnapshotStore
+    private let lock = NSLock()
+    private var oneShotHook: (@Sendable () throws -> Void)?
+
+    init(base: AppGroupSnapshotStore) {
+        self.base = base
+    }
+
+    func armOneShotBeforeRevisionCheck(_ hook: @escaping @Sendable () throws -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        oneShotHook = hook
+    }
+
+    func loadSnapshot() throws -> LockScreenSnapshot {
+        try base.loadSnapshot()
+    }
+
+    func currentStateMarker() throws -> SnapshotStateMarker {
+        try base.currentStateMarker()
+    }
+
+    @discardableResult
+    func beginSession(userId: UUID) throws -> LockScreenSnapshot {
+        try base.beginSession(userId: userId)
+    }
+
+    @discardableResult
+    func saveSnapshotIfSessionMatches(
+        _ snapshot: LockScreenSnapshot,
+        expectedUserId: UUID,
+        expectedSessionEpoch: UUID,
+        expectedRevisionId: UUID
+    ) throws -> LockScreenSnapshot {
+        try base.saveSnapshotIfSessionMatches(
+            snapshot,
+            expectedUserId: expectedUserId,
+            expectedSessionEpoch: expectedSessionEpoch,
+            expectedRevisionId: expectedRevisionId
+        )
+    }
+
+    @discardableResult
+    func mutateSnapshotIfSessionMatches(
+        expectedUserId: UUID,
+        expectedSessionEpoch: UUID,
+        expectedRevisionId: UUID?,
+        _ transform: (inout LockScreenSnapshot) throws -> Void
+    ) throws -> LockScreenSnapshot {
+        if expectedRevisionId != nil {
+            let hookToRun: (@Sendable () throws -> Void)? = {
+                lock.lock()
+                defer { lock.unlock() }
+                let hook = oneShotHook
+                oneShotHook = nil
+                return hook
+            }()
+            try hookToRun?()
+        }
+        return try base.mutateSnapshotIfSessionMatches(
+            expectedUserId: expectedUserId,
+            expectedSessionEpoch: expectedSessionEpoch,
+            expectedRevisionId: expectedRevisionId,
+            transform
+        )
+    }
+
+    @discardableResult
+    func clearAllForLogout() throws -> LockScreenSnapshot {
+        try base.clearAllForLogout()
+    }
 }

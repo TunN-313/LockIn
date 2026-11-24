@@ -343,108 +343,109 @@ public final class StudyScheduleService: SchedulerModuleProtocol, @unchecked Sen
         }
     }
 
+    private struct ScheduledActivationCommitResult: Sendable {
+        let schedule: StudyScheduleDTO
+        let deckTitle: String
+        let committedSnapshot: LockScreenSnapshot
+    }
+
     public func activateScheduledSession(scheduleId: UUID) async throws -> ScheduledSessionActivationResult {
         let session = try isolationGuard.requireActiveSession()
         let uid = session.userId
         let expectedEpoch = session.sessionEpoch
 
         for attempt in 0..<2 {
-            let initialSnapshot = try snapshotStore.loadSnapshot()
-            guard initialSnapshot.activeUserId == uid,
-                  initialSnapshot.sessionEpoch == expectedEpoch else {
-                throw AppGroupStorageError.sessionInvalidatedOrLoggedOut
-            }
-            let expectedRevisionId = initialSnapshot.snapshotRevisionId
-
-            let sessionData: (
-                schedule: StudyScheduleDTO,
-                deckTitle: String,
-                firstCard: (id: UUID, question: String, answer: String)?,
-                totalCards: Int,
-                masteredCards: Int,
-                hideAnswerByDefault: Bool,
-                shufflePoolIds: [String],
-                progressRatio: Double,
-                streakCount: Int
-            ) = try await studyStore.perform { context in
-                guard self.isolationGuard.currentUserId() == uid,
-                      self.isolationGuard.currentSessionEpoch() == expectedEpoch else {
-                    throw AppGroupStorageError.sessionInvalidatedOrLoggedOut
-                }
-
-                let sid = scheduleId
-                guard let schedule = try context.fetch(
-                    FetchDescriptor<StudySchedule>(predicate: #Predicate<StudySchedule> { $0.id == sid && $0.ownerUserId == uid })
-                ).first else {
-                    throw LockInDomainError.entityNotFound
-                }
-
-                let targetDeckId = schedule.deckId
-                guard let deck = try context.fetch(
-                    FetchDescriptor<StudyDeck>(predicate: #Predicate<StudyDeck> { $0.id == targetDeckId && $0.ownerUserId == uid })
-                ).first else {
-                    throw LockInDomainError.entityNotFound
-                }
-
-                let orderedCards = deck.cards
-                    .filter { $0.ownerUserId == uid }
-                    .sorted { ($0.sortOrder, $0.id.uuidString) < ($1.sortOrder, $1.id.uuidString) }
-
-                let pref = try ThemeCatalogService.fetchOrCreatePreference(for: uid, in: context)
-                let progress = try SharedDailyProgressHelper.fetchOrCreateTodayProgress(for: uid, in: context)
-                if context.hasChanges {
-                    try context.save()
-                }
-
-                let first = orderedCards.first.map { ($0.id, $0.question, $0.answer) }
-                let mastered = orderedCards.filter { $0.status == .mastered }.count
-
-                return (
-                    Self.toDTO(schedule),
-                    deck.title,
-                    first,
-                    orderedCards.count,
-                    mastered,
-                    pref.hideAnswerByDefault,
-                    pref.shufflePoolIds,
-                    SharedDailyProgressHelper.completionRatio(for: progress),
-                    progress.streakCount
-                )
-            }
-
-            let effectiveThemeId: String = {
-                if sessionData.schedule.autoRotateTheme {
-                    return SharedThemeRotationEngine.selectNextThemeId(
-                        currentThemeId: initialSnapshot.activeThemeId,
-                        shufflePoolIds: sessionData.shufflePoolIds
-                    )
-                }
-                return initialSnapshot.activeThemeId
-            }()
-
-            let updatedSnapshot: LockScreenSnapshot
+            let guardService = self.isolationGuard
+            let store = self.snapshotStore
+            let commitResult: ScheduledActivationCommitResult
             do {
-                updatedSnapshot = try snapshotStore.mutateSnapshotIfSessionMatches(
-                    expectedUserId: uid,
-                    expectedSessionEpoch: expectedEpoch,
-                    expectedRevisionId: expectedRevisionId
-                ) { state in
-                    // Chỉ cập nhật bộ đề, thẻ, tiến độ và theme (nếu bật xoay vòng).
-                    // Luôn giữ nguyên privacyModeEnabled và fontScaleRaw mới nhất trong snapshot.
-                    state.activeDeckId = sessionData.schedule.deckId
-                    state.activeDeckTitle = sessionData.deckTitle
-                    state.currentCardId = sessionData.firstCard?.id
-                    state.currentCardQuestion = sessionData.firstCard?.question ?? "Bộ đề chưa có thẻ ôn."
-                    state.currentCardAnswer = sessionData.firstCard?.answer ?? ""
-                    state.currentCardIndex = 0
-                    state.totalCardsInDeck = sessionData.totalCards
-                    state.masteredCountInDeck = sessionData.masteredCards
-                    state.isAnswerVisible = !sessionData.hideAnswerByDefault
-                    if sessionData.schedule.autoRotateTheme {
-                        state.activeThemeId = effectiveThemeId
+                commitResult = try await studyStore.perform { context -> ScheduledActivationCommitResult in
+                    guard guardService.currentUserId() == uid,
+                          guardService.currentSessionEpoch() == expectedEpoch else {
+                        throw AppGroupStorageError.sessionInvalidatedOrLoggedOut
                     }
-                    state.dailyProgressRatio = sessionData.progressRatio
-                    state.streakCount = sessionData.streakCount
+
+                    let initialSnapshot = try store.loadSnapshot()
+                    guard initialSnapshot.activeUserId == uid,
+                          initialSnapshot.sessionEpoch == expectedEpoch else {
+                        throw AppGroupStorageError.sessionInvalidatedOrLoggedOut
+                    }
+                    let expectedRevisionId = initialSnapshot.snapshotRevisionId
+
+                    let sid = scheduleId
+                    guard let schedule = try context.fetch(
+                        FetchDescriptor<StudySchedule>(predicate: #Predicate<StudySchedule> { $0.id == sid && $0.ownerUserId == uid })
+                    ).first else {
+                        throw LockInDomainError.entityNotFound
+                    }
+
+                    let targetDeckId = schedule.deckId
+                    guard let deck = try context.fetch(
+                        FetchDescriptor<StudyDeck>(predicate: #Predicate<StudyDeck> { $0.id == targetDeckId && $0.ownerUserId == uid })
+                    ).first else {
+                        throw LockInDomainError.entityNotFound
+                    }
+
+                    let orderedCards = deck.cards
+                        .filter { $0.ownerUserId == uid }
+                        .sorted { ($0.sortOrder, $0.id.uuidString) < ($1.sortOrder, $1.id.uuidString) }
+
+                    let pref = try ThemeCatalogService.fetchOrCreatePreference(for: uid, in: context)
+                    let progress = try SharedDailyProgressHelper.fetchOrCreateTodayProgress(for: uid, in: context)
+
+                    let scheduleDTO = Self.toDTO(schedule)
+                    let first = orderedCards.first.map { ($0.id, $0.question, $0.answer) }
+                    let totalCards = orderedCards.count
+                    let masteredCards = orderedCards.filter { $0.status == .mastered }.count
+                    let hideAnswerByDefault = pref.hideAnswerByDefault
+                    let progressRatio = SharedDailyProgressHelper.completionRatio(for: progress)
+                    let streakCount = progress.streakCount
+
+                    let effectiveThemeId = scheduleDTO.autoRotateTheme
+                        ? SharedThemeRotationEngine.selectNextThemeId(
+                            currentThemeId: initialSnapshot.activeThemeId,
+                            shufflePoolIds: pref.shufflePoolIds
+                        )
+                        : initialSnapshot.activeThemeId
+
+                    // Phối hợp cập nhật SwiftData và snapshot trong cùng khóa flock + kiểm tra expectedRevisionId.
+                    let updatedSnapshot = try store.mutateSnapshotIfSessionMatches(
+                        expectedUserId: uid,
+                        expectedSessionEpoch: expectedEpoch,
+                        expectedRevisionId: expectedRevisionId
+                    ) { state in
+                        guard guardService.currentUserId() == uid,
+                              guardService.currentSessionEpoch() == expectedEpoch else {
+                            throw AppGroupStorageError.sessionInvalidatedOrLoggedOut
+                        }
+
+                        if scheduleDTO.autoRotateTheme {
+                            pref.activeThemeId = effectiveThemeId
+                            state.activeThemeId = effectiveThemeId
+                        }
+                        if context.hasChanges {
+                            try context.save()
+                        }
+
+                        // Chỉ cập nhật bộ đề, thẻ và tiến độ; luôn giữ nguyên privacyModeEnabled và fontScaleRaw mới nhất trong snapshot.
+                        state.activeDeckId = scheduleDTO.deckId
+                        state.activeDeckTitle = deck.title
+                        state.currentCardId = first?.0
+                        state.currentCardQuestion = first?.1 ?? "Bộ đề chưa có thẻ ôn."
+                        state.currentCardAnswer = first?.2 ?? ""
+                        state.currentCardIndex = 0
+                        state.totalCardsInDeck = totalCards
+                        state.masteredCountInDeck = masteredCards
+                        state.isAnswerVisible = !hideAnswerByDefault
+                        state.dailyProgressRatio = progressRatio
+                        state.streakCount = streakCount
+                    }
+
+                    return ScheduledActivationCommitResult(
+                        schedule: scheduleDTO,
+                        deckTitle: deck.title,
+                        committedSnapshot: updatedSnapshot
+                    )
                 }
             } catch let error as AppGroupStorageError {
                 if case .staleSnapshotRevision = error, attempt == 0 {
@@ -453,25 +454,7 @@ public final class StudyScheduleService: SchedulerModuleProtocol, @unchecked Sen
                 throw error
             }
 
-            if sessionData.schedule.autoRotateTheme {
-                let targetThemeId = updatedSnapshot.activeThemeId
-                try await studyStore.perform { context in
-                    guard self.isolationGuard.currentUserId() == uid,
-                          self.isolationGuard.currentSessionEpoch() == expectedEpoch else {
-                        throw AppGroupStorageError.sessionInvalidatedOrLoggedOut
-                    }
-                    let liveSnapshot = try self.snapshotStore.loadSnapshot()
-                    guard liveSnapshot.activeUserId == uid,
-                          liveSnapshot.sessionEpoch == expectedEpoch else {
-                        throw AppGroupStorageError.sessionInvalidatedOrLoggedOut
-                    }
-                    let pref = try ThemeCatalogService.fetchOrCreatePreference(for: uid, in: context)
-                    pref.activeThemeId = targetThemeId
-                    try context.save()
-                }
-            }
-
-            let latestSnapshot = try snapshotStore.loadSnapshot()
+            let latestSnapshot = (try? snapshotStore.loadSnapshot()) ?? commitResult.committedSnapshot
             guard latestSnapshot.activeUserId == uid,
                   latestSnapshot.sessionEpoch == expectedEpoch else {
                 throw AppGroupStorageError.sessionInvalidatedOrLoggedOut
@@ -486,9 +469,9 @@ public final class StudyScheduleService: SchedulerModuleProtocol, @unchecked Sen
                 version: latestSnapshot.snapshotVersion,
                 revisionId: latestSnapshot.snapshotRevisionId
             )
-            let rotatedTheme = sessionData.schedule.autoRotateTheme
-            let activeThemeId = latestSnapshot.activeThemeId
-            let deckId = sessionData.schedule.deckId
+            let rotatedTheme = commitResult.schedule.autoRotateTheme
+            let activeThemeId = commitResult.committedSnapshot.activeThemeId
+            let deckId = commitResult.schedule.deckId
             await MainActor.run {
                 syncEventBus.publish(.cardsChanged(deckId: deckId), observedMarker: marker)
                 if rotatedTheme {
@@ -497,10 +480,10 @@ public final class StudyScheduleService: SchedulerModuleProtocol, @unchecked Sen
             }
 
             return ScheduledSessionActivationResult(
-                schedule: sessionData.schedule,
-                prioritizedDeckId: sessionData.schedule.deckId,
-                prioritizedDeckTitle: sessionData.deckTitle,
-                didRotateTheme: sessionData.schedule.autoRotateTheme,
+                schedule: commitResult.schedule,
+                prioritizedDeckId: commitResult.schedule.deckId,
+                prioritizedDeckTitle: commitResult.deckTitle,
+                didRotateTheme: commitResult.schedule.autoRotateTheme,
                 activeThemeId: activeThemeId
             )
         }
