@@ -465,17 +465,40 @@ public final class StudyScheduleService: SchedulerModuleProtocol, @unchecked Sen
             WidgetCenter.shared.reloadAllTimelines()
             CrossProcessNotifier.postStateDidChange()
 
-            let marker = SnapshotStateMarker(
-                version: latestSnapshot.snapshotVersion,
-                revisionId: latestSnapshot.snapshotRevisionId
-            )
+            let committed = commitResult.committedSnapshot
             let rotatedTheme = commitResult.schedule.autoRotateTheme
-            let activeThemeId = commitResult.committedSnapshot.activeThemeId
             let deckId = commitResult.schedule.deckId
-            await MainActor.run {
-                syncEventBus.publish(.cardsChanged(deckId: deckId), observedMarker: marker)
-                if rotatedTheme {
-                    syncEventBus.publish(.themeRotated(themeId: activeThemeId), observedMarker: marker)
+            let store = self.snapshotStore
+
+            let publishedThemeId: String = await MainActor.run {
+                let liveSnapshot = try? store.loadSnapshot()
+                guard let liveSnapshot,
+                      liveSnapshot.activeUserId == uid,
+                      liveSnapshot.sessionEpoch == expectedEpoch else {
+                    return committed.activeThemeId
+                }
+
+                if liveSnapshot.snapshotRevisionId == committed.snapshotRevisionId {
+                    let committedMarker = SnapshotStateMarker(
+                        version: committed.snapshotVersion,
+                        revisionId: committed.snapshotRevisionId
+                    )
+                    syncEventBus.publish(.cardsChanged(deckId: deckId), observedMarker: committedMarker)
+                    if rotatedTheme {
+                        syncEventBus.publish(.themeRotated(themeId: committed.activeThemeId), observedMarker: committedMarker)
+                    }
+                    return committed.activeThemeId
+                } else {
+                    // Snapshot đã chuyển sang revision mới hơn sau khi commit: phát theme và marker từ cùng liveSnapshot
+                    // kèm .externalStateRefreshed để UI không hiển thị theme cũ dưới revision mới.
+                    let liveMarker = SnapshotStateMarker(
+                        version: liveSnapshot.snapshotVersion,
+                        revisionId: liveSnapshot.snapshotRevisionId
+                    )
+                    syncEventBus.publish(.cardsChanged(deckId: deckId), observedMarker: liveMarker)
+                    syncEventBus.publish(.themeRotated(themeId: liveSnapshot.activeThemeId), observedMarker: liveMarker)
+                    syncEventBus.publish(.externalStateRefreshed(snapshotVersion: liveSnapshot.snapshotVersion), observedMarker: liveMarker)
+                    return liveSnapshot.activeThemeId
                 }
             }
 
@@ -484,7 +507,7 @@ public final class StudyScheduleService: SchedulerModuleProtocol, @unchecked Sen
                 prioritizedDeckId: commitResult.schedule.deckId,
                 prioritizedDeckTitle: commitResult.deckTitle,
                 didRotateTheme: commitResult.schedule.autoRotateTheme,
-                activeThemeId: activeThemeId
+                activeThemeId: publishedThemeId
             )
         }
 

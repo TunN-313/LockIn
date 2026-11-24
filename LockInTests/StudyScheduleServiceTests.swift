@@ -754,6 +754,16 @@ final class StudyScheduleServiceTests: XCTestCase {
             autoRotateTheme: true
         )
 
+        let recorder = SyncEventRecorder()
+        let eventStream = raceEnv.container.syncEventBus.subscribe()
+        let collectorTask = Task { @MainActor in
+            for await event in eventStream {
+                recorder.record(event)
+            }
+        }
+        defer { collectorTask.cancel() }
+        await Task.yield()
+
         let schedulerService = raceEnv.container.scheduler
         let themeService = raceEnv.container.theme
         let scheduleId = raceSchedule.id
@@ -777,9 +787,125 @@ final class StudyScheduleServiceTests: XCTestCase {
                 try await group.waitForAll()
             }
 
+            for _ in 0..<10 {
+                await Task.yield()
+            }
+
             let snap = try raceEnv.snapshotStore.loadSnapshot()
             let pref = try await raceEnv.container.theme.fetchPreference()
             XCTAssertEqual(snap.activeThemeId, pref.activeThemeId)
+            XCTAssertEqual(recorder.lastThemeId, snap.activeThemeId)
+            XCTAssertEqual(
+                raceEnv.container.syncEventBus.lastObservedMarker,
+                SnapshotStateMarker(version: snap.snapshotVersion, revisionId: snap.snapshotRevisionId)
+            )
+        }
+    }
+
+    @MainActor
+    func testActivateScheduledSessionPublishesConsistentThemeAndRevisionEventWhenSupersededAfterCommit() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LockInPostCommitSupersede-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let modelContainer = try SharedStoreContainer.makeInMemoryForTesting()
+        let baseStore = try AppGroupSnapshotStore.makeForTesting(directoryURL: tempDir)
+        let injectingStore = ConcurrentRevisionInjectingSnapshotStore(base: baseStore)
+        let container = DependencyContainer.makeForTesting(
+            modelContainer: modelContainer,
+            snapshotStore: injectingStore,
+            keychain: InMemoryKeychainStorage(),
+            notificationService: InMemoryLocalNotificationService(),
+            enableDarwinObserver: false,
+            settingsDirectoryURL: tempDir
+        )
+
+        let user = try await container.auth.register(
+            username: "post_commit_supersede",
+            displayName: "Post Commit Supersede",
+            password: "EventSync#2026"
+        )
+        _ = try await container.theme.updateShuffleConfiguration(
+            isEnabled: false,
+            poolIds: [ThemePalette.minimalPaper.id, ThemePalette.midnightInk.id],
+            rotateOnAppOpen: false,
+            rotateOnShortcutTrigger: false
+        )
+        let deck = try await container.study.createDeck(
+            title: "UI Event Sync Deck",
+            subjectTag: "iOS",
+            accentHex: "#2563EB",
+            examDate: nil,
+            dailyGoal: 10
+        )
+        _ = try await container.study.upsertCard(
+            cardId: nil,
+            deckId: deck.id,
+            question: "Sync Q",
+            answer: "Sync A",
+            hintOrNote: "",
+            status: .new
+        )
+        let schedule = try await container.scheduler.saveSchedule(
+            scheduleId: nil,
+            deckId: deck.id,
+            title: "Lịch kiểm tra UI event",
+            hour: 20,
+            minute: 0,
+            weekdaysMask: 0b1111111,
+            isEnabled: true,
+            autoRotateTheme: true
+        )
+
+        let recorder = SyncEventRecorder()
+        let stream = container.syncEventBus.subscribe()
+        let collectorTask = Task { @MainActor in
+            for await event in stream {
+                recorder.record(event)
+            }
+        }
+        defer { collectorTask.cancel() }
+        await Task.yield()
+
+        let epoch = try XCTUnwrap(try baseStore.loadSnapshot().sessionEpoch)
+        // Ngay sau khi Scheduler commit snapshot (midnightInk), tiêm một cập nhật khác sang warmSand (revision mới hơn).
+        injectingStore.armOneShotAfterRevisionCommit {
+            _ = try baseStore.mutateSnapshotIfSessionMatches(
+                expectedUserId: user.id,
+                expectedSessionEpoch: epoch
+            ) { state in
+                state.activeThemeId = ThemePalette.warmSand.id
+            }
+        }
+
+        let activation = try await container.scheduler.activateScheduledSession(scheduleId: schedule.id)
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+
+        let snapAfter = try baseStore.loadSnapshot()
+        XCTAssertEqual(snapAfter.activeThemeId, ThemePalette.warmSand.id)
+        // Không được phát midnightInk dưới revision của warmSand.
+        XCTAssertEqual(activation.activeThemeId, ThemePalette.warmSand.id)
+        XCTAssertEqual(recorder.lastThemeId, ThemePalette.warmSand.id)
+        XCTAssertTrue(recorder.events.contains(.externalStateRefreshed(snapshotVersion: snapAfter.snapshotVersion)))
+        XCTAssertEqual(
+            container.syncEventBus.lastObservedMarker,
+            SnapshotStateMarker(version: snapAfter.snapshotVersion, revisionId: snapAfter.snapshotRevisionId)
+        )
+    }
+}
+
+@MainActor
+private final class SyncEventRecorder {
+    var events: [SyncDomainEvent] = []
+    var lastThemeId: String?
+
+    func record(_ event: SyncDomainEvent) {
+        events.append(event)
+        if case .themeRotated(let themeId) = event {
+            lastThemeId = themeId
         }
     }
 }
@@ -788,6 +914,7 @@ private final class ConcurrentRevisionInjectingSnapshotStore: AppGroupSnapshotSt
     private let base: AppGroupSnapshotStore
     private let lock = NSLock()
     private var oneShotHook: (@Sendable () throws -> Void)?
+    private var oneShotAfterCommitHook: (@Sendable () throws -> Void)?
 
     init(base: AppGroupSnapshotStore) {
         self.base = base
@@ -797,6 +924,12 @@ private final class ConcurrentRevisionInjectingSnapshotStore: AppGroupSnapshotSt
         lock.lock()
         defer { lock.unlock() }
         oneShotHook = hook
+    }
+
+    func armOneShotAfterRevisionCommit(_ hook: @escaping @Sendable () throws -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        oneShotAfterCommitHook = hook
     }
 
     func loadSnapshot() throws -> LockScreenSnapshot {
@@ -844,12 +977,23 @@ private final class ConcurrentRevisionInjectingSnapshotStore: AppGroupSnapshotSt
             }()
             try hookToRun?()
         }
-        return try base.mutateSnapshotIfSessionMatches(
+        let committed = try base.mutateSnapshotIfSessionMatches(
             expectedUserId: expectedUserId,
             expectedSessionEpoch: expectedSessionEpoch,
             expectedRevisionId: expectedRevisionId,
             transform
         )
+        if expectedRevisionId != nil {
+            let postHook: (@Sendable () throws -> Void)? = {
+                lock.lock()
+                defer { lock.unlock() }
+                let hook = oneShotAfterCommitHook
+                oneShotAfterCommitHook = nil
+                return hook
+            }()
+            try postHook?()
+        }
+        return committed
     }
 
     @discardableResult

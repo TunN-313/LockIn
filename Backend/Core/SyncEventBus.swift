@@ -64,7 +64,7 @@ public final class SyncEventBus {
     /// Phát sự kiện domain. Chỉ cập nhật `lastObservedMarker` khi caller truyền đúng `observedMarker`
     /// vừa xử lý; tuyệt đối không tự đọc snapshot mới nhất để tránh nuốt nhầm sự kiện từ Extension.
     public func publish(_ event: SyncDomainEvent, observedMarker: SnapshotStateMarker? = nil) {
-        if let observedMarker {
+        if let observedMarker, observedMarker.version >= lastObservedMarker.version {
             lastObservedMarker = observedMarker
         }
         lastEvent = event

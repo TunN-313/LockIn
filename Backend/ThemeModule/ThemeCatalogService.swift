@@ -154,11 +154,14 @@ public final class ThemeCatalogService: ThemeCatalogServiceProtocol, @unchecked 
 
         let dto = commitResult.dto
         let updatedSnapshot = commitResult.snapshot
+        let liveSnapshotForActivity = (try? store.loadSnapshot()).flatMap {
+            ($0.activeUserId == session.userId && $0.sessionEpoch == session.sessionEpoch) ? $0 : nil
+        } ?? updatedSnapshot
 
-        if updatedSnapshot.activeDeckId != nil {
-            let contentState = SharedCardNavigationEngine.makeContentState(from: updatedSnapshot)
+        if liveSnapshotForActivity.activeDeckId != nil {
+            let contentState = SharedCardNavigationEngine.makeContentState(from: liveSnapshotForActivity)
             await SharedCardNavigationEngine.updateRunningLiveActivities(
-                deckId: updatedSnapshot.activeDeckId,
+                deckId: liveSnapshotForActivity.activeDeckId,
                 state: contentState
             )
         }
@@ -166,12 +169,28 @@ public final class ThemeCatalogService: ThemeCatalogServiceProtocol, @unchecked 
         WidgetCenter.shared.reloadAllTimelines()
         CrossProcessNotifier.postStateDidChange()
 
-        let marker = SnapshotStateMarker(
-            version: updatedSnapshot.snapshotVersion,
-            revisionId: updatedSnapshot.snapshotRevisionId
-        )
         await MainActor.run {
-            syncEventBus.publish(.themeRotated(themeId: dto.activeThemeId), observedMarker: marker)
+            let liveSnapshot = try? store.loadSnapshot()
+            guard let liveSnapshot,
+                  liveSnapshot.activeUserId == session.userId,
+                  liveSnapshot.sessionEpoch == session.sessionEpoch else {
+                return
+            }
+
+            if liveSnapshot.snapshotRevisionId == updatedSnapshot.snapshotRevisionId {
+                let marker = SnapshotStateMarker(
+                    version: updatedSnapshot.snapshotVersion,
+                    revisionId: updatedSnapshot.snapshotRevisionId
+                )
+                syncEventBus.publish(.themeRotated(themeId: updatedSnapshot.activeThemeId), observedMarker: marker)
+            } else {
+                let liveMarker = SnapshotStateMarker(
+                    version: liveSnapshot.snapshotVersion,
+                    revisionId: liveSnapshot.snapshotRevisionId
+                )
+                syncEventBus.publish(.themeRotated(themeId: liveSnapshot.activeThemeId), observedMarker: liveMarker)
+                syncEventBus.publish(.externalStateRefreshed(snapshotVersion: liveSnapshot.snapshotVersion), observedMarker: liveMarker)
+            }
         }
         return dto
     }
