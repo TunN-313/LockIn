@@ -172,4 +172,158 @@ final class ThemeShuffleEngineTests: XCTestCase {
             }
         }
     }
+
+    @MainActor
+    func testSharedThemeRotationEnginePrioritizesDueScheduleAcrossMidnightAndPreservesPrivacy() async throws {
+        let env = try LockInTestEnvironment()
+        defer { env.cleanup() }
+        let credential = "ShortcutSchedule#2026"
+
+        _ = try await env.container.auth.register(
+            username: "shortcut_sched_owner",
+            displayName: "Shortcut Schedule Owner",
+            password: credential
+        )
+        _ = try await env.container.theme.updateShuffleConfiguration(
+            isEnabled: false,
+            poolIds: [ThemePalette.minimalPaper.id, ThemePalette.midnightInk.id],
+            rotateOnAppOpen: false,
+            rotateOnShortcutTrigger: false
+        )
+        _ = try await env.container.theme.updateLockScreenDisplayOptions(
+            fontScale: .large,
+            hideAnswerByDefault: true,
+            privacyModeEnabled: true,
+            showPopupOnOpen: true
+        )
+
+        let deckA = try await env.container.study.createDeck(
+            title: "Initial Deck A",
+            subjectTag: "General",
+            accentHex: "#2563EB",
+            examDate: nil,
+            dailyGoal: 10
+        )
+        _ = try await env.container.study.upsertCard(
+            cardId: nil,
+            deckId: deckA.id,
+            question: "Initial Q",
+            answer: "Initial A",
+            hintOrNote: "",
+            status: .new
+        )
+        let seededSnap = try env.snapshotStore.loadSnapshot()
+        let userId = try XCTUnwrap(seededSnap.activeUserId)
+        let sessionEpoch = try XCTUnwrap(seededSnap.sessionEpoch)
+        _ = try env.snapshotStore.mutateSnapshotIfSessionMatches(
+            expectedUserId: userId,
+            expectedSessionEpoch: sessionEpoch
+        ) { state in
+            state.activeDeckId = deckA.id
+            state.activeDeckTitle = deckA.title
+            state.currentCardQuestion = "Initial Q"
+            state.currentCardAnswer = "Initial A"
+            state.totalCardsInDeck = 1
+        }
+
+        let deckB = try await env.container.study.createDeck(
+            title: "Shortcut Midnight Deck B",
+            subjectTag: "Chemistry",
+            accentHex: "#16A34A",
+            examDate: nil,
+            dailyGoal: 10
+        )
+        _ = try await env.container.study.upsertCard(
+            cardId: nil,
+            deckId: deckB.id,
+            question: "Q-Midnight",
+            answer: "A-Midnight",
+            hintOrNote: "",
+            status: .new
+        )
+
+        let cal = Calendar.current
+        let monday = try XCTUnwrap(cal.date(from: DateComponents(year: 2026, month: 11, day: 23, hour: 12, minute: 0)))
+        let tuesday0015 = try XCTUnwrap(cal.date(from: DateComponents(year: 2026, month: 11, day: 24, hour: 0, minute: 15)))
+        let mondayBit = 1 << (cal.component(.weekday, from: monday) - 1)
+
+        let schedB = try await env.container.scheduler.saveSchedule(
+            scheduleId: nil,
+            deckId: deckB.id,
+            title: "Shortcut TimeOfDay 23:30",
+            hour: 23,
+            minute: 30,
+            weekdaysMask: mondayBit,
+            isEnabled: true,
+            autoRotateTheme: true
+        )
+
+        let sharedEngine = SharedThemeRotationEngine(
+            modelContainer: env.modelContainer,
+            snapshotStore: env.snapshotStore
+        )
+
+        // Chạy intent lúc 00:15 ngày hôm sau -> ưu tiên deckB từ lịch 23:30, xoay sang midnightInk và giữ Privacy Mode + Large font.
+        let result1 = try await sharedEngine.rotateThemeInSharedStore(referenceDate: tuesday0015, calendar: cal)
+        XCTAssertEqual(result1.prioritizedDeckId, deckB.id)
+        XCTAssertTrue(result1.didRotateTheme)
+        XCTAssertEqual(result1.nextTheme.id, ThemePalette.midnightInk.id)
+
+        let snap1 = try env.snapshotStore.loadSnapshot()
+        XCTAssertEqual(snap1.activeDeckId, deckB.id)
+        XCTAssertEqual(snap1.currentCardQuestion, "Q-Midnight")
+        XCTAssertEqual(snap1.activeThemeId, ThemePalette.midnightInk.id)
+        XCTAssertTrue(snap1.privacyModeEnabled)
+        XCTAssertEqual(snap1.fontScaleRaw, LockScreenFontScale.large.rawValue)
+
+        // Tắt lịch B và bật lịch C cùng giờ với autoRotateTheme = false, rotateOnShortcutTrigger = false -> vẫn ưu tiên deckC nhưng giữ theme.
+        _ = try await env.container.scheduler.saveSchedule(
+            scheduleId: schedB.id,
+            deckId: deckB.id,
+            title: schedB.title,
+            hour: schedB.hour,
+            minute: schedB.minute,
+            weekdaysMask: schedB.weekdaysMask,
+            isEnabled: false,
+            autoRotateTheme: true
+        )
+
+        let deckC = try await env.container.study.createDeck(
+            title: "Shortcut Deck C Keep Theme",
+            subjectTag: "History",
+            accentHex: "#F59E0B",
+            examDate: nil,
+            dailyGoal: 10
+        )
+        _ = try await env.container.study.upsertCard(
+            cardId: nil,
+            deckId: deckC.id,
+            question: "Q-History",
+            answer: "A-History",
+            hintOrNote: "",
+            status: .new
+        )
+        _ = try await env.container.scheduler.saveSchedule(
+            scheduleId: nil,
+            deckId: deckC.id,
+            title: "Shortcut C Keep Theme",
+            hour: 23,
+            minute: 30,
+            weekdaysMask: mondayBit,
+            isEnabled: true,
+            autoRotateTheme: false
+        )
+
+        let result2 = try await sharedEngine.rotateThemeInSharedStore(referenceDate: tuesday0015, calendar: cal)
+        XCTAssertEqual(result2.prioritizedDeckId, deckC.id)
+        XCTAssertFalse(result2.didRotateTheme)
+        XCTAssertEqual(result2.nextTheme.id, ThemePalette.midnightInk.id)
+
+        let snap2 = try env.snapshotStore.loadSnapshot()
+        XCTAssertEqual(snap2.activeDeckId, deckC.id)
+        XCTAssertEqual(snap2.currentCardQuestion, "Q-History")
+        XCTAssertEqual(snap2.activeThemeId, ThemePalette.midnightInk.id)
+        XCTAssertTrue(snap2.privacyModeEnabled)
+        XCTAssertEqual(snap2.fontScaleRaw, LockScreenFontScale.large.rawValue)
+    }
 }

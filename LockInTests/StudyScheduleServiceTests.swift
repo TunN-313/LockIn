@@ -119,12 +119,14 @@ final class StudyScheduleServiceTests: XCTestCase {
         )
         XCTAssertEqual(env.notificationService.pendingIdentifiers.count, 2)
 
+        let resyncCallsBeforeDelete = env.notificationService.resyncCallCount
         let cancelCallsBeforeDelete = env.notificationService.cancelAllCallCount
         try await env.container.scheduler.deleteSchedule(scheduleId: created.id)
         let schedulesAfterDelete = try await env.container.scheduler.fetchSchedules()
         XCTAssertTrue(schedulesAfterDelete.isEmpty)
         XCTAssertTrue(env.notificationService.pendingIdentifiers.isEmpty)
-        XCTAssertGreaterThan(env.notificationService.cancelAllCallCount, cancelCallsBeforeDelete)
+        XCTAssertGreaterThan(env.notificationService.resyncCallCount, resyncCallsBeforeDelete)
+        XCTAssertEqual(env.notificationService.cancelAllCallCount, cancelCallsBeforeDelete)
     }
 
     @MainActor
@@ -358,6 +360,276 @@ final class StudyScheduleServiceTests: XCTestCase {
         XCTAssertEqual(manualResult.prioritizedDeckId, deckA.id)
         XCTAssertFalse(manualResult.didRotateTheme)
         XCTAssertEqual(manualResult.activeThemeId, ThemePalette.midnightInk.id)
-        XCTAssertEqual(try env.snapshotStore.loadSnapshot().activeDeckId, deckA.id)
+        let snapshotAfterManual = try env.snapshotStore.loadSnapshot()
+        XCTAssertEqual(snapshotAfterManual.activeDeckId, deckA.id)
+    }
+
+    @MainActor
+    func testSnoozeSurvivesSameProfileResyncAndClearsOnLogoutOrProfileSwitch() async throws {
+        let env = try LockInTestEnvironment()
+        defer { env.cleanup() }
+        let credential = "SnoozeOwner#2026"
+
+        let userA = try await env.container.auth.register(
+            username: "snooze_user_a",
+            displayName: "Snooze User A",
+            password: credential
+        )
+        let deckA = try await env.container.study.createDeck(
+            title: "Snooze Deck A",
+            subjectTag: "Math",
+            accentHex: "#2563EB",
+            examDate: nil,
+            dailyGoal: 10
+        )
+
+        _ = try await env.container.scheduler.scheduleSnoozeReminder(
+            afterMinutes: 30,
+            suggestedDeckTitle: deckA.title
+        )
+        let expectedSnoozeId = "\(LocalNotificationService.snoozeReminderPrefix)\(userA.id.uuidString)"
+        XCTAssertEqual(env.notificationService.snoozeIdentifiers, [expectedSnoozeId])
+
+        // Lưu lịch học mới và đổi tần suất nhắc trên cùng hồ sơ -> snooze vẫn phải được giữ nguyên.
+        _ = try await env.container.scheduler.saveSchedule(
+            scheduleId: nil,
+            deckId: deckA.id,
+            title: "Lịch tối cùng hồ sơ",
+            hour: 21,
+            minute: 0,
+            weekdaysMask: 0b0000100,
+            isEnabled: true,
+            autoRotateTheme: false
+        )
+        XCTAssertEqual(env.notificationService.snoozeIdentifiers, [expectedSnoozeId])
+
+        _ = try await env.container.scheduler.updateReminderFrequency(.daily)
+        XCTAssertEqual(env.notificationService.snoozeIdentifiers, [expectedSnoozeId])
+
+        // Hẹn snooze mới -> thay thế đúng một lượt snooze cho hồ sơ đó.
+        _ = try await env.container.scheduler.scheduleSnoozeReminder(
+            afterMinutes: 45,
+            suggestedDeckTitle: deckA.title
+        )
+        XCTAssertEqual(env.notificationService.snoozeIdentifiers, [expectedSnoozeId])
+
+        // Đăng xuất -> xóa sạch snooze.
+        try await env.container.auth.logout()
+        XCTAssertTrue(env.notificationService.snoozeIdentifiers.isEmpty)
+
+        // Chuyển hồ sơ từ A sang B -> xóa sạch snooze của hồ sơ A.
+        let userB = try await env.container.auth.register(
+            username: "snooze_user_b",
+            displayName: "Snooze User B",
+            password: credential
+        )
+        _ = try await env.container.auth.switchProfile(userId: userA.id, password: credential)
+        _ = try await env.container.scheduler.scheduleSnoozeReminder(
+            afterMinutes: 20,
+            suggestedDeckTitle: deckA.title
+        )
+        XCTAssertEqual(env.notificationService.snoozeIdentifiers, [expectedSnoozeId])
+
+        _ = try await env.container.auth.switchProfile(userId: userB.id, password: credential)
+        XCTAssertTrue(env.notificationService.snoozeIdentifiers.isEmpty)
+    }
+
+    @MainActor
+    func testMidnightWrapAroundDueScheduleWindowAndNoDoubleApply() async throws {
+        let cal = Calendar.current
+        let dayD = try XCTUnwrap(cal.date(from: DateComponents(year: 2026, month: 11, day: 23, hour: 12, minute: 0)))
+        let dayD2345 = try XCTUnwrap(cal.date(from: DateComponents(year: 2026, month: 11, day: 23, hour: 23, minute: 45)))
+        let dayDPlus10015 = try XCTUnwrap(cal.date(from: DateComponents(year: 2026, month: 11, day: 24, hour: 0, minute: 15)))
+        let dayDPlus10030 = try XCTUnwrap(cal.date(from: DateComponents(year: 2026, month: 11, day: 24, hour: 0, minute: 30)))
+        let dayDPlus10145 = try XCTUnwrap(cal.date(from: DateComponents(year: 2026, month: 11, day: 24, hour: 1, minute: 45)))
+        let dayDBit = 1 << (cal.component(.weekday, from: dayD) - 1)
+
+        // Kịch bản 1: Mở app lúc 23:45 ngày D rồi mở lại lúc 00:15 ngày D+1 -> chỉ kích hoạt 1 lần, không lặp qua nửa đêm.
+        do {
+            let env = try LockInTestEnvironment()
+            defer { env.cleanup() }
+            let credential = "MidnightPass#2026"
+
+            _ = try await env.container.auth.register(
+                username: "midnight_no_dup",
+                displayName: "Midnight No Dup",
+                password: credential
+            )
+            _ = try await env.container.theme.updateShuffleConfiguration(
+                isEnabled: false,
+                poolIds: [ThemePalette.minimalPaper.id, ThemePalette.midnightInk.id],
+                rotateOnAppOpen: false,
+                rotateOnShortcutTrigger: true
+            )
+            let deck = try await env.container.study.createDeck(
+                title: "Late Night Deck",
+                subjectTag: "Review",
+                accentHex: "#2563EB",
+                examDate: nil,
+                dailyGoal: 10
+            )
+            _ = try await env.container.study.upsertCard(
+                cardId: nil,
+                deckId: deck.id,
+                question: "Late Q",
+                answer: "Late A",
+                hintOrNote: "",
+                status: .new
+            )
+            let schedule = try await env.container.scheduler.saveSchedule(
+                scheduleId: nil,
+                deckId: deck.id,
+                title: "Ôn khuya 23:30",
+                hour: 23,
+                minute: 30,
+                weekdaysMask: dayDBit,
+                isEnabled: true,
+                autoRotateTheme: true
+            )
+
+            let activeAt0015 = try await env.container.scheduler.activeOrDueSchedule(at: dayDPlus10015)
+            XCTAssertEqual(activeAt0015?.id, schedule.id)
+
+            let expiredAt0145 = try await env.container.scheduler.activeOrDueSchedule(at: dayDPlus10145)
+            XCTAssertNil(expiredAt0145)
+
+            let firstApply = try await env.container.scheduler.applyDueScheduleIfNeeded(at: dayD2345)
+            XCTAssertEqual(firstApply?.prioritizedDeckId, deck.id)
+            XCTAssertEqual(firstApply?.didRotateTheme, true)
+
+            let secondApplyAfterMidnight = try await env.container.scheduler.applyDueScheduleIfNeeded(at: dayDPlus10015)
+            XCTAssertNil(secondApplyAfterMidnight)
+        }
+
+        // Kịch bản 2: Bỏ qua lúc 23:45 và chỉ mới mở app lúc 00:15 ngày D+1 -> vẫn nhận diện lịch 23:30 hôm qua trong cửa sổ 2 giờ.
+        do {
+            let env = try LockInTestEnvironment()
+            defer { env.cleanup() }
+            let credential = "MidnightCross#2026"
+
+            _ = try await env.container.auth.register(
+                username: "midnight_cross_open",
+                displayName: "Midnight Cross",
+                password: credential
+            )
+            _ = try await env.container.theme.updateShuffleConfiguration(
+                isEnabled: false,
+                poolIds: [ThemePalette.minimalPaper.id, ThemePalette.midnightInk.id],
+                rotateOnAppOpen: false,
+                rotateOnShortcutTrigger: true
+            )
+            let deck = try await env.container.study.createDeck(
+                title: "Cross Midnight Deck",
+                subjectTag: "Exam",
+                accentHex: "#16A34A",
+                examDate: nil,
+                dailyGoal: 10
+            )
+            _ = try await env.container.study.upsertCard(
+                cardId: nil,
+                deckId: deck.id,
+                question: "Cross Q",
+                answer: "Cross A",
+                hintOrNote: "",
+                status: .new
+            )
+            _ = try await env.container.scheduler.saveSchedule(
+                scheduleId: nil,
+                deckId: deck.id,
+                title: "Ôn khuya hôm trước",
+                hour: 23,
+                minute: 30,
+                weekdaysMask: dayDBit,
+                isEnabled: true,
+                autoRotateTheme: true
+            )
+
+            let appliedAcrossMidnight = try await env.container.scheduler.applyDueScheduleIfNeeded(at: dayDPlus10015)
+            let result = try XCTUnwrap(appliedAcrossMidnight)
+            XCTAssertEqual(result.prioritizedDeckId, deck.id)
+            XCTAssertTrue(result.didRotateTheme)
+            XCTAssertEqual(result.activeThemeId, ThemePalette.midnightInk.id)
+
+            let snap = try env.snapshotStore.loadSnapshot()
+            XCTAssertEqual(snap.activeDeckId, deck.id)
+            XCTAssertEqual(snap.activeThemeId, ThemePalette.midnightInk.id)
+
+            let duplicateCheck = try await env.container.scheduler.applyDueScheduleIfNeeded(at: dayDPlus10030)
+            XCTAssertNil(duplicateCheck)
+        }
+    }
+
+    @MainActor
+    func testActivateScheduledSessionPreservesLivePrivacyModeAndFontScale() async throws {
+        let env = try LockInTestEnvironment()
+        defer { env.cleanup() }
+        let credential = "PrivacySchedule#2026"
+
+        let user = try await env.container.auth.register(
+            username: "privacy_schedule_user",
+            displayName: "Privacy Owner",
+            password: credential
+        )
+        _ = try await env.container.theme.updateShuffleConfiguration(
+            isEnabled: false,
+            poolIds: [ThemePalette.minimalPaper.id, ThemePalette.midnightInk.id],
+            rotateOnAppOpen: false,
+            rotateOnShortcutTrigger: true
+        )
+        // Bảo đảm ThemePreference ban đầu đang tắt Privacy Mode và cỡ chữ standard.
+        _ = try await env.container.theme.updateLockScreenDisplayOptions(
+            fontScale: .standard,
+            hideAnswerByDefault: true,
+            privacyModeEnabled: false,
+            showPopupOnOpen: true
+        )
+
+        let deck = try await env.container.study.createDeck(
+            title: "Confidential Deck",
+            subjectTag: "Law",
+            accentHex: "#2563EB",
+            examDate: nil,
+            dailyGoal: 10
+        )
+        _ = try await env.container.study.upsertCard(
+            cardId: nil,
+            deckId: deck.id,
+            question: "Secret Clause",
+            answer: "Protected Answer",
+            hintOrNote: "",
+            status: .new
+        )
+        let schedule = try await env.container.scheduler.saveSchedule(
+            scheduleId: nil,
+            deckId: deck.id,
+            title: "Ôn bảo mật",
+            hour: 20,
+            minute: 0,
+            weekdaysMask: 0b1111111,
+            isEnabled: true,
+            autoRotateTheme: true
+        )
+
+        // Mô phỏng người dùng vừa bật Privacy Mode + Large font trong snapshot mới nhất.
+        let beforeSnap = try env.snapshotStore.loadSnapshot()
+        let epoch = try XCTUnwrap(beforeSnap.sessionEpoch)
+        _ = try env.snapshotStore.mutateSnapshotIfSessionMatches(
+            expectedUserId: user.id,
+            expectedSessionEpoch: epoch
+        ) { state in
+            state.privacyModeEnabled = true
+            state.fontScaleRaw = LockScreenFontScale.large.rawValue
+        }
+
+        let activation = try await env.container.scheduler.activateScheduledSession(scheduleId: schedule.id)
+        XCTAssertEqual(activation.prioritizedDeckId, deck.id)
+        XCTAssertTrue(activation.didRotateTheme)
+        XCTAssertEqual(activation.activeThemeId, ThemePalette.midnightInk.id)
+
+        let afterSnap = try env.snapshotStore.loadSnapshot()
+        XCTAssertEqual(afterSnap.activeDeckId, deck.id)
+        XCTAssertEqual(afterSnap.activeThemeId, ThemePalette.midnightInk.id)
+        XCTAssertTrue(afterSnap.privacyModeEnabled)
+        XCTAssertEqual(afterSnap.fontScaleRaw, LockScreenFontScale.large.rawValue)
     }
 }

@@ -291,27 +291,14 @@ public final class TaskProgressStreakService: TaskProgressStreakServiceProtocol,
             }
 
             let decksById = Dictionary(uniqueKeysWithValues: decks.map { ($0.id, $0) })
-            let calendar = Calendar.current
-            let startOfToday = calendar.startOfDay(for: now)
-            let todayBit = 1 << (calendar.component(.weekday, from: now) - 1)
-            let schedules = try context.fetch(
-                FetchDescriptor<StudySchedule>(predicate: #Predicate<StudySchedule> { $0.ownerUserId == uid && $0.isEnabled == true })
+            let dueScheduleMatch = try SharedThemeRotationEngine.findDueSchedule(
+                for: uid,
+                at: now,
+                windowBeforeSeconds: 15 * 60,
+                windowAfterSeconds: 2 * 3600,
+                in: context
             )
-            let dueDeck = schedules
-                .compactMap { schedule -> (deck: StudyDeck, scheduledAt: Date)? in
-                    guard (schedule.weekdaysMask & todayBit) != 0,
-                          let deck = decksById[schedule.deckId],
-                          let scheduledAt = calendar.date(bySettingHour: schedule.hour, minute: schedule.minute, second: 0, of: startOfToday) else {
-                        return nil
-                    }
-                    let windowStart = scheduledAt.addingTimeInterval(-15 * 60)
-                    let windowEnd = scheduledAt.addingTimeInterval(2 * 3600)
-                    guard now >= windowStart && now <= windowEnd else { return nil }
-                    return (deck, scheduledAt)
-                }
-                .sorted { $0.scheduledAt > $1.scheduledAt }
-                .first?
-                .deck
+            let dueDeck = dueScheduleMatch.flatMap { decksById[$0.schedule.deckId] }
 
             let prioritizedDeck = dueDeck ?? decks.first
 

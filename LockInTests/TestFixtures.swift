@@ -88,6 +88,7 @@ public final class InMemoryLocalNotificationService: LocalNotificationServicePro
     public var deliveredIdentifiers: [String] = []
     public var snoozeIdentifiers: [String] = []
     public var cancelAllCallCount = 0
+    public var resyncCallCount = 0
 
     public init() {}
 
@@ -118,9 +119,13 @@ public final class InMemoryLocalNotificationService: LocalNotificationServicePro
         deckTitlesById: [UUID: String],
         reminderFrequency: ReminderNotificationFrequency
     ) async throws {
-        await cancelAllLockInNotifications()
         lock.lock()
         defer { lock.unlock() }
+        resyncCallCount += 1
+        let preservedSnoozeId = "\(LocalNotificationService.snoozeReminderPrefix)\(userId.uuidString)"
+        pendingIdentifiers.removeAll { $0.hasPrefix(LocalNotificationService.lockInAllPrefix) && $0 != preservedSnoozeId }
+        deliveredIdentifiers.removeAll { $0.hasPrefix(LocalNotificationService.lockInAllPrefix) && $0 != preservedSnoozeId }
+        snoozeIdentifiers.removeAll { $0.hasPrefix(LocalNotificationService.lockInAllPrefix) && $0 != preservedSnoozeId }
         guard authorized else { return }
         let userPrefix = "\(LocalNotificationService.lockInNotificationPrefix)\(userId.uuidString)."
         for schedule in schedules where schedule.isEnabled && schedule.ownerUserId == userId {

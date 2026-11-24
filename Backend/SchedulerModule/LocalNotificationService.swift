@@ -79,13 +79,34 @@ public final class LocalNotificationService: LocalNotificationServiceProtocol {
         }
     }
 
+    private func cancelSchedulesAndPeriodicReminders(preservingSnoozeForUserId userId: UUID) async {
+        let center = UNUserNotificationCenter.current()
+        let preservedSnoozeId = "\(Self.snoozeReminderPrefix)\(userId.uuidString)"
+
+        let pendingRequests = await center.pendingNotificationRequests()
+        let pendingIds = pendingRequests
+            .map(\.identifier)
+            .filter { $0.hasPrefix(Self.lockInAllPrefix) && $0 != preservedSnoozeId }
+        if !pendingIds.isEmpty {
+            center.removePendingNotificationRequests(withIdentifiers: pendingIds)
+        }
+
+        let deliveredNotifications = await center.deliveredNotifications()
+        let deliveredIds = deliveredNotifications
+            .map { $0.request.identifier }
+            .filter { $0.hasPrefix(Self.lockInAllPrefix) && $0 != preservedSnoozeId }
+        if !deliveredIds.isEmpty {
+            center.removeDeliveredNotifications(withIdentifiers: deliveredIds)
+        }
+    }
+
     public func resyncNotifications(
         forUserId userId: UUID,
         schedules: [StudyScheduleDTO],
         deckTitlesById: [UUID: String],
         reminderFrequency: ReminderNotificationFrequency
     ) async throws {
-        await cancelAllLockInNotifications()
+        await cancelSchedulesAndPeriodicReminders(preservingSnoozeForUserId: userId)
 
         guard await isAuthorized() else { return }
 
