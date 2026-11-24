@@ -40,7 +40,7 @@ public struct ShortcutsGuideSheetView: View {
                         Label("Mẹo ghim Widget lên màn hình khóa", systemImage: "rectangle.grid.1x2")
                             .font(.headline)
                         bullet("Nhấn giữ màn hình khóa iPhone → Tùy chỉnh → Màn hình khóa.")
-                        bullet("Thêm widget \"Vòng tiến độ LockIn\" (tròn) và \"Ôn nhanh / Tác vụ LockIn\" (chữ nhật) dưới đồng hồ.")
+                        bullet("Thêm widget \"Tiến độ ôn thi\" (tròn) và \"Ôn nhanh & Việc cần làm\" (chữ nhật) dưới đồng hồ.")
                     }
                     .minimalCardStyle()
                 }

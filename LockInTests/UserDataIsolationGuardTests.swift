@@ -209,4 +209,65 @@ final class UserDataIsolationGuardTests: XCTestCase {
         let cardsA = try await env.container.study.fetchCards(deckId: deckA.id)
         XCTAssertEqual(cardsA.count, 1)
     }
+
+    func testAppGroupResolutionSupportsMobileProvisionSideloadAndFallbacks() throws {
+        let syntheticPlist = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Entitlements</key>
+            <dict>
+                <key>com.apple.security.application-groups</key>
+                <array>
+                    <string>group.com.lockin.shared.TEAM999</string>
+                </array>
+            </dict>
+        </dict>
+        </plist>
+        """
+        var cmsWrappedData = Data([0x30, 0x82, 0x01, 0x00, 0xFF, 0x00])
+        cmsWrappedData.append(Data(syntheticPlist.utf8))
+        cmsWrappedData.append(Data([0x01, 0x02, 0x03]))
+
+        let extracted = AppConstants.extractAppGroups(fromMobileProvisionData: cmsWrappedData)
+        XCTAssertEqual(extracted, ["group.com.lockin.shared.TEAM999"])
+        XCTAssertTrue(AppConstants.extractAppGroups(fromMobileProvisionData: Data([0xDE, 0xAD, 0xBE, 0xEF])).isEmpty)
+
+        // 1. Sideloaded iPhone (AltStore/SideStore/Sideloadly đổi App Group trong mobileprovision).
+        let sideloadResolved = AppConstants.resolveAppGroupIdentifier(
+            infoPlistGroupId: AppConstants.defaultAppGroupIdentifier,
+            mobileProvisionGroups: extracted,
+            bundleIdentifier: "com.lockin.app.TEAM999",
+            isContainerAvailable: { $0 == "group.com.lockin.shared.TEAM999" }
+        )
+        XCTAssertEqual(sideloadResolved, "group.com.lockin.shared.TEAM999")
+
+        // 2. Widget Extension bundle fallback khi thiếu mobileprovision hoặc Info.plist chưa khớp.
+        let extensionFallback = AppConstants.resolveAppGroupIdentifier(
+            infoPlistGroupId: nil,
+            mobileProvisionGroups: [],
+            bundleIdentifier: "com.custom.lockin.widgets",
+            isContainerAvailable: { $0 == "group.com.custom.lockin" }
+        )
+        XCTAssertEqual(extensionFallback, "group.com.custom.lockin")
+
+        // 3. TestFlight / chuẩn Xcode dùng Info.plist App Group.
+        let standardResolved = AppConstants.resolveAppGroupIdentifier(
+            infoPlistGroupId: AppConstants.defaultAppGroupIdentifier,
+            mobileProvisionGroups: [],
+            bundleIdentifier: AppConstants.defaultBundleIdentifier,
+            isContainerAvailable: { $0 == AppConstants.defaultAppGroupIdentifier }
+        )
+        XCTAssertEqual(standardResolved, AppConstants.defaultAppGroupIdentifier)
+
+        // 4. Simulator / Unit Test host (không có container) vẫn trả về mặc định an toàn.
+        let hostFallback = AppConstants.resolveAppGroupIdentifier(
+            infoPlistGroupId: "$(LOCKIN_APP_GROUP_ID)",
+            mobileProvisionGroups: [],
+            bundleIdentifier: AppConstants.defaultBundleIdentifier,
+            isContainerAvailable: { _ in false }
+        )
+        XCTAssertEqual(hostFallback, AppConstants.defaultAppGroupIdentifier)
+    }
 }

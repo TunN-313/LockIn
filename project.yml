@@ -29,7 +29,6 @@ targets:
           - "Config/*.entitlements"
       - path: Backend
       - path: Frontend
-        optional: true
     dependencies:
       - target: LockInWidgetsExtension
         embed: true
@@ -68,7 +67,6 @@ targets:
           - "Config/*.plist"
           - "Config/*.entitlements"
       - path: LockInWidgetsExtension
-        optional: true
     info:
       path: Shared/Config/LockInWidgetsExtension-Info.plist
       properties:
@@ -95,7 +93,6 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - path: LockInTests
-        optional: true
     dependencies:
       - target: LockInApp
     settings:
@@ -113,3 +110,7 @@ schemes:
     test:
       targets:
         - LockInTests
+  LockInWidgetsExtension:
+    build:
+      targets:
+        LockInWidgetsExtension: all

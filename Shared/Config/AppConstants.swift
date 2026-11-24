@@ -8,13 +8,97 @@ public enum AppConstants {
     public static let defaultBundleIdentifier = "com.lockin.app"
     public static let defaultAppGroupIdentifier = "group.com.lockin.shared"
 
+    private static let cachedResolvedAppGroupIdentifier: String = {
+        resolveAppGroupIdentifier(
+            infoPlistGroupId: Bundle.main.object(forInfoDictionaryKey: "LockInAppGroupIdentifier") as? String,
+            mobileProvisionGroups: loadAppGroupsFromEmbeddedProvision(),
+            bundleIdentifier: Bundle.main.bundleIdentifier,
+            isContainerAvailable: { groupId in
+                FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupId) != nil
+            }
+        )
+    }()
+
     public static var resolvedAppGroupIdentifier: String {
-        if let configured = Bundle.main.object(forInfoDictionaryKey: "LockInAppGroupIdentifier") as? String,
-           !configured.isEmpty,
-           !configured.contains("$(") {
-            return configured
+        cachedResolvedAppGroupIdentifier
+    }
+
+    public static func resolveAppGroupIdentifier(
+        infoPlistGroupId: String?,
+        mobileProvisionGroups: [String],
+        bundleIdentifier: String?,
+        isContainerAvailable: (String) -> Bool
+    ) -> String {
+        func sanitized(_ raw: String?) -> String? {
+            guard let raw else { return nil }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !trimmed.contains("$(") else { return nil }
+            return trimmed
+        }
+
+        var orderedCandidates: [String] = []
+        var seen: Set<String> = []
+        func appendCandidate(_ candidate: String?) {
+            guard let clean = sanitized(candidate), !seen.contains(clean) else { return }
+            seen.insert(clean)
+            orderedCandidates.append(clean)
+        }
+
+        for group in mobileProvisionGroups {
+            appendCandidate(group)
+        }
+        appendCandidate(infoPlistGroupId)
+
+        if let bundleId = sanitized(bundleIdentifier) {
+            let baseBundleId = bundleId.hasSuffix(".widgets")
+                ? String(bundleId.dropLast(".widgets".count))
+                : bundleId
+            appendCandidate("group.\(baseBundleId)")
+            appendCandidate("group.\(baseBundleId).shared")
+        }
+
+        appendCandidate(defaultAppGroupIdentifier)
+
+        for candidate in orderedCandidates where isContainerAvailable(candidate) {
+            return candidate
+        }
+
+        if let firstProvisioned = mobileProvisionGroups.compactMap(sanitized).first {
+            return firstProvisioned
+        }
+        if let configuredInfo = sanitized(infoPlistGroupId) {
+            return configuredInfo
         }
         return defaultAppGroupIdentifier
+    }
+
+    public static func extractAppGroups(fromMobileProvisionData data: Data) -> [String] {
+        guard let rawText = String(data: data, encoding: .isoLatin1),
+              let plistStart = rawText.range(of: "<plist"),
+              let plistEnd = rawText.range(of: "</plist>", range: plistStart.lowerBound..<rawText.endIndex) else {
+            return []
+        }
+
+        let plistSnippet = String(rawText[plistStart.lowerBound..<plistEnd.upperBound])
+        guard let plistData = plistSnippet.data(using: .utf8),
+              let plistObject = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil),
+              let rootDict = plistObject as? [String: Any],
+              let entitlements = rootDict["Entitlements"] as? [String: Any],
+              let groups = entitlements["com.apple.security.application-groups"] as? [String] else {
+            return []
+        }
+
+        return groups
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private static func loadAppGroupsFromEmbeddedProvision() -> [String] {
+        guard let provisionURL = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+              let provisionData = try? Data(contentsOf: provisionURL) else {
+            return []
+        }
+        return extractAppGroups(fromMobileProvisionData: provisionData)
     }
 
     public static var keychainServiceIdentifier: String {
