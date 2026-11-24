@@ -468,7 +468,6 @@ public final class StudyScheduleService: SchedulerModuleProtocol, @unchecked Sen
             let committed = commitResult.committedSnapshot
             let rotatedTheme = commitResult.schedule.autoRotateTheme
             let deckId = commitResult.schedule.deckId
-            let store = self.snapshotStore
 
             let publishedThemeId: String = await MainActor.run {
                 let liveSnapshot = try? store.loadSnapshot()
